@@ -1,4 +1,9 @@
-/bin/
-/target/
-/extension.wasm
 .DS_Store
+.codegraph/
+.zed/
+!.zed/settings.json
+bin/
+target/
+docs/
+extension.wasm
+RESEARCH.md

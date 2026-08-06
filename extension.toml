@@ -1,12 +1,12 @@
-id = "go-implementation-lens"
-name = "Go Implementation Lens"
-description = "Shows Go interface implementations and references as CodeLens entries."
-version = "0.1.0"
+id = "go-codelens"
+name = "Go CodeLens"
+description = "Shows Go references and interface implementations as CodeLens entries."
+version = "0.3.1"
 schema_version = 1
-authors = ["Johnny"]
-repository = "https://github.com/Johnny0x38E/go-implementation-lens-for-zed"
+authors = ["Johnny <huangjianit@gmail.com>"]
+repository = "https://github.com/Johnny0x38E/go-codelens-for-zed"
 
-[language_servers.go-implementation-lens]
-name = "Go Implementation Lens"
+[language_servers.go-codelens]
+name = "Go CodeLens"
 language_ids = { Go = "go" }
 languages = ["Go"]

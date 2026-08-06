@@ -1,0 +1,57 @@
+version: "2"
+
+run:
+    timeout: 10m
+    modules-download-mode: readonly
+    tests: true
+
+linters:
+    default: standard
+    enable:
+        - asciicheck
+        - bidichk
+        - bodyclose
+        - contextcheck
+        - durationcheck
+        - errname
+        - errorlint
+        - forcetypeassert
+        - gocheckcompilerdirectives
+        - gocritic
+        - godoclint
+        - gosec
+        - makezero
+        - misspell
+        - modernize
+        - musttag
+        - nilerr
+        - nilnesserr
+        - nolintlint
+        - perfsprint
+        - predeclared
+        - reassign
+        - recvcheck
+        - sqlclosecheck
+        - unconvert
+        - usestdlibvars
+        - wastedassign
+        - whitespace
+
+    settings:
+        errcheck:
+            check-type-assertions: true
+            check-blank: true
+        staticcheck:
+            checks:
+                - all
+
+    exclusions:
+        generated: strict
+
+formatters:
+    enable:
+        - gofmt
+
+issues:
+    max-issues-per-linter: 0
+    max-same-issues: 0

@@ -178,8 +178,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "go-implementation-lens-for-zed"
-version = "0.1.0"
+name = "go-codelens-for-zed"
+version = "0.3.1"
 dependencies = [
  "zed_extension_api",
 ]

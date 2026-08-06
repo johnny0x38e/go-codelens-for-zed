@@ -57,8 +57,11 @@ func TestServeInitialize(t *testing.T) {
 	if !ok {
 		t.Fatalf("serverInfo = %#v, want object", result["serverInfo"])
 	}
-	if got := serverInfo["version"]; got != "0.1.0" {
-		t.Fatalf("serverInfo.version = %#v, want 0.1.0", got)
+	if got := serverInfo["name"]; got != "go-codelens-ls" {
+		t.Fatalf("serverInfo.name = %#v, want go-codelens-ls", got)
+	}
+	if got := serverInfo["version"]; got != "0.3.1" {
+		t.Fatalf("serverInfo.version = %#v, want 0.3.1", got)
 	}
 }
 
@@ -144,17 +147,6 @@ func TestServeWithTraceRecordsRequestAndResponseMethods(t *testing.T) {
 	if got := trace.String(); got != "--> initialize\n<-- initialize\n--> exit\n" {
 		t.Fatalf("trace = %q", got)
 	}
-}
-
-func assertTestRange(t *testing.T, value any, line, character float64) {
-	t.Helper()
-
-	rangeValue, ok := value.(map[string]any)
-	if !ok {
-		t.Fatalf("range = %#v, want object", value)
-	}
-	assertTestPosition(t, rangeValue["start"], line, character)
-	assertTestPosition(t, rangeValue["end"], line, character)
 }
 
 func assertTestPosition(t *testing.T, value any, line, character float64) {

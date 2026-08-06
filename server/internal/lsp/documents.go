@@ -2,56 +2,103 @@ package lsp
 
 import (
 	"bytes"
-	"path/filepath"
+	"os"
+	"strings"
 	"sync"
 
-	"github.com/johnny/go-implementation-lens-for-zed/server/internal/analysis"
+	"github.com/johnny/go-codelens-for-zed/server/internal/analysis"
 )
 
+// documentStore owns immutable copies of unsaved full-document contents.
+// Callers receive defensive copies so analysis can run after releasing mu.
 type documentStore struct {
-	mu         sync.RWMutex
-	documents  map[string][]byte
-	generation uint64
+	mu        sync.RWMutex
+	documents map[string][]byte
 }
 
 func newDocumentStore() *documentStore {
 	return &documentStore{documents: make(map[string][]byte)}
 }
 
-func (s *documentStore) Open(uri, text string) {
-	s.set(uri, []byte(text))
-}
-
-func (s *documentStore) Change(uri, text string) {
-	s.set(uri, []byte(text))
-}
-
-func (s *documentStore) Close(uri string) {
+func (s *documentStore) Open(uri, text string) (string, bool) {
 	path, err := analysis.URIToPath(uri)
 	if err != nil {
-		return
+		return "", false
 	}
+	content := []byte(text)
+	diskContent, readErr := os.ReadFile(path) //nolint:gosec // LSP document URIs intentionally identify local workspace files.
+	if readErr == nil && bytes.Equal(diskContent, content) {
+		return path, s.remove(path)
+	}
+	return path, s.setPath(path, content)
+}
+
+func (s *documentStore) Change(uri, text string) (string, bool) {
+	path, err := analysis.URIToPath(uri)
+	if err != nil {
+		return "", false
+	}
+	return path, s.setPath(path, []byte(text))
+}
+
+func (s *documentStore) Save(uri string) (string, bool) {
+	path, err := analysis.URIToPath(uri)
+	if err != nil {
+		return "", false
+	}
+	diskContent, readErr := os.ReadFile(path) //nolint:gosec // LSP document URIs intentionally identify local workspace files.
+	return path, s.removeIfSaved(path, diskContent, readErr)
+}
+
+func (s *documentStore) Close(uri string) (string, bool) {
+	path, err := analysis.URIToPath(uri)
+	if err != nil {
+		return "", false
+	}
+	return path, s.remove(path)
+}
+
+func (s *documentStore) remove(path string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.documents[path]; !ok {
-		return
+		return false
 	}
 	delete(s.documents, path)
-	s.generation++
+	return true
 }
 
-func (s *documentStore) Invalidate() {
+func (s *documentStore) removeIfSaved(path string, diskContent []byte, readErr error) bool {
 	s.mu.Lock()
-	s.generation++
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	overlay, ok := s.documents[path]
+	if !ok {
+		return false
+	}
+	delete(s.documents, path)
+	if readErr != nil || !bytes.Equal(overlay, diskContent) {
+		return true
+	}
+	return false
 }
 
 func (s *documentStore) Overlay(moduleDir string) map[string][]byte {
+	return s.OverlayForRoots([]string{moduleDir})
+}
+
+func (s *documentStore) OverlayForRoots(roots []string) map[string][]byte {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make(map[string][]byte)
 	for path, content := range s.documents {
-		if !pathWithinRoot(path, moduleDir) {
+		insideScope := false
+		for _, root := range roots {
+			if pathWithinRoot(path, root) {
+				insideScope = true
+				break
+			}
+		}
+		if !insideScope {
 			continue
 		}
 		result[path] = append([]byte(nil), content...)
@@ -59,32 +106,24 @@ func (s *documentStore) Overlay(moduleDir string) map[string][]byte {
 	return result
 }
 
-func (s *documentStore) Generation() uint64 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.generation
-}
-
-func (s *documentStore) set(uri string, content []byte) {
-	path, err := analysis.URIToPath(uri)
-	if err != nil {
-		return
-	}
+func (s *documentStore) setPath(path string, content []byte) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, ok := s.documents[path]; ok && bytes.Equal(existing, content) {
-		return
+		return false
 	}
-	s.documents[path] = append([]byte(nil), content...)
-	s.generation++
+	// Open and Change pass newly allocated byte slices that are never mutated
+	// after this ownership transfer.
+	s.documents[path] = content
+	return true
 }
 
 func pathWithinRoot(path, root string) bool {
-	relative, err := filepath.Rel(root, path)
-	return err == nil && relative != ".." && relative != "." &&
-		!filepath.IsAbs(relative) && !hasParentPrefix(relative)
-}
-
-func hasParentPrefix(relative string) bool {
-	return len(relative) > 3 && relative[:3] == ".."+string(filepath.Separator)
+	if root == "" || len(path) <= len(root) || !strings.HasPrefix(path, root) {
+		return false
+	}
+	if os.IsPathSeparator(root[len(root)-1]) {
+		return true
+	}
+	return os.IsPathSeparator(path[len(root)])
 }

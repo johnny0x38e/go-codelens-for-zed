@@ -8,65 +8,62 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 
-	"github.com/johnny/go-implementation-lens-for-zed/server/internal/analysis"
+	"github.com/johnny/go-codelens-for-zed/server/internal/analysis"
+	"golang.org/x/sync/singleflight"
 )
 
 const jsonRPCVersion = "2.0"
 
-type request struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id,omitempty"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
-}
-
-type response struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"`
-	Result  any             `json:"result,omitempty"`
-	Error   *responseError  `json:"error,omitempty"`
-}
-
-type responseError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
 type serverState struct {
 	workspaceRoots []string
 	documents      *documentStore
+	metadataMu     sync.RWMutex
+	analysisScopes map[analysisScopeCacheKey]cachedAnalysisScope
+	documentPaths  map[string]documentPath
 	cacheMu        sync.RWMutex
 	snapshots      map[string]cachedSnapshot
+	analysisGroup  singleflight.Group
+	findScope      func(string, string) (analysis.AnalysisScope, error)
+	analyzeScope   func(context.Context, analysis.AnalysisScope, map[string][]byte) (analysis.Snapshot, error)
+}
+
+type analysisScopeCacheKey struct {
+	directory     string
+	workspaceRoot string
+}
+
+type cachedAnalysisScope struct {
+	scope analysis.AnalysisScope
+	err   error
+}
+
+type documentPath struct {
+	filename string
+	uri      string
 }
 
 type cachedSnapshot struct {
-	generation uint64
-	snapshot   analysis.Snapshot
-}
-
-type codeLens struct {
-	Range   analysis.Range `json:"range"`
-	Command command        `json:"command"`
-}
-
-type command struct {
-	Title     string `json:"title"`
-	Command   string `json:"command"`
-	Arguments []any  `json:"arguments,omitempty"`
+	scope            analysis.AnalysisScope
+	revision         uint64
+	snapshotRevision uint64
+	valid            bool
+	snapshot         analysis.Snapshot
 }
 
 // Serve handles Language Server Protocol messages until the client sends exit
 // or the input stream reaches EOF.
 func Serve(ctx context.Context, in io.Reader, out io.Writer) error {
-	return ServeWithTrace(ctx, in, out, io.Discard)
+	return ServeWithTrace(ctx, in, out, nil)
 }
 
 // ServeWithTrace is Serve with optional request/response method tracing. The
-// trace stream is diagnostic only: write failures never interrupt LSP traffic.
+// trace stream is diagnostic only: nil disables tracing, and write failures
+// never interrupt LSP traffic.
 func ServeWithTrace(ctx context.Context, in io.Reader, out io.Writer, trace io.Writer) error {
 	reader := bufio.NewReader(in)
 	state := newServerState()
@@ -113,8 +110,8 @@ func ServeWithTrace(ctx context.Context, in io.Reader, out io.Writer, trace io.W
 						},
 					},
 					"serverInfo": map[string]any{
-						"name":    "go-implementation-lens-ls",
-						"version": "0.1.0",
+						"name":    "go-codelens-ls",
+						"version": "0.3.1",
 					},
 				},
 			}
@@ -162,8 +159,12 @@ func ServeWithTrace(ctx context.Context, in io.Reader, out io.Writer, trace io.W
 
 func newServerState() *serverState {
 	return &serverState{
-		documents: newDocumentStore(),
-		snapshots: make(map[string]cachedSnapshot),
+		documents:      newDocumentStore(),
+		analysisScopes: make(map[analysisScopeCacheKey]cachedAnalysisScope),
+		documentPaths:  make(map[string]documentPath),
+		snapshots:      make(map[string]cachedSnapshot),
+		findScope:      analysis.FindAnalysisScope,
+		analyzeScope:   analysis.AnalyzeScope,
 	}
 }
 
@@ -171,16 +172,11 @@ func traceMethod(trace io.Writer, direction, method string) {
 	if trace == nil {
 		return
 	}
-	_, _ = fmt.Fprintf(trace, "%s %s\n", direction, method)
+	_, _ = fmt.Fprintf(trace, "%s %s\n", direction, method) //nolint:errcheck // Diagnostic tracing is best effort.
 }
 
 func (s *serverState) initialize(params json.RawMessage) {
-	var input struct {
-		RootURI          string `json:"rootUri"`
-		WorkspaceFolders []struct {
-			URI string `json:"uri"`
-		} `json:"workspaceFolders"`
-	}
+	var input initializeParams
 	if err := json.Unmarshal(params, &input); err != nil {
 		return
 	}
@@ -206,47 +202,57 @@ func (s *serverState) initialize(params json.RawMessage) {
 func (s *serverState) handleNotification(method string, params json.RawMessage) {
 	switch method {
 	case "textDocument/didOpen":
-		var input struct {
-			TextDocument struct {
-				URI  string `json:"uri"`
-				Text string `json:"text"`
-			} `json:"textDocument"`
-		}
+		var input didOpenTextDocumentParams
 		if json.Unmarshal(params, &input) == nil {
-			s.documents.Open(input.TextDocument.URI, input.TextDocument.Text)
+			path, changed := s.documents.Open(input.TextDocument.URI, input.TextDocument.Text)
+			if changed {
+				s.invalidateSnapshotsForPath(path)
+			}
+			if isModuleMetadataPath(path) {
+				s.invalidateAnalysisScopes()
+			}
 		}
 	case "textDocument/didChange":
-		var input struct {
-			TextDocument struct {
-				URI string `json:"uri"`
-			} `json:"textDocument"`
-			ContentChanges []struct {
-				Text string `json:"text"`
-			} `json:"contentChanges"`
-		}
+		var input didChangeTextDocumentParams
 		if json.Unmarshal(params, &input) == nil && len(input.ContentChanges) > 0 {
-			s.documents.Change(input.TextDocument.URI, input.ContentChanges[len(input.ContentChanges)-1].Text)
+			path, changed := s.documents.Change(input.TextDocument.URI, input.ContentChanges[len(input.ContentChanges)-1].Text)
+			if changed {
+				s.invalidateSnapshotsForPath(path)
+			}
+			if isModuleMetadataPath(path) {
+				s.invalidateAnalysisScopes()
+			}
 		}
 	case "textDocument/didClose":
-		var input struct {
-			TextDocument struct {
-				URI string `json:"uri"`
-			} `json:"textDocument"`
-		}
+		var input textDocumentParams
 		if json.Unmarshal(params, &input) == nil {
-			s.documents.Close(input.TextDocument.URI)
+			path, changed := s.documents.Close(input.TextDocument.URI)
+			if changed {
+				s.invalidateSnapshotsForPath(path)
+			}
+			if isModuleMetadataPath(path) {
+				s.invalidateAnalysisScopes()
+			}
+			s.forgetDocumentPath(input.TextDocument.URI)
 		}
-	case "textDocument/didSave", "workspace/didChangeWatchedFiles":
-		s.documents.Invalidate()
+	case "textDocument/didSave":
+		var input textDocumentParams
+		if json.Unmarshal(params, &input) == nil {
+			path, changed := s.documents.Save(input.TextDocument.URI)
+			if changed {
+				s.invalidateSnapshotsForPath(path)
+			}
+			if isModuleMetadataPath(path) {
+				s.invalidateAnalysisScopes()
+			}
+		}
+	case "workspace/didChangeWatchedFiles":
+		s.handleWatchedFiles(params)
 	}
 }
 
 func (s *serverState) semanticCodeLenses(ctx context.Context, params json.RawMessage) ([]codeLens, error) {
-	var input struct {
-		TextDocument struct {
-			URI string `json:"uri"`
-		} `json:"textDocument"`
-	}
+	var input textDocumentParams
 	if err := json.Unmarshal(params, &input); err != nil {
 		return nil, fmt.Errorf("invalid textDocument/codeLens params: %w", err)
 	}
@@ -254,26 +260,24 @@ func (s *serverState) semanticCodeLenses(ctx context.Context, params json.RawMes
 		return nil, errors.New("textDocument/codeLens params must include textDocument.uri")
 	}
 
-	filename, err := analysis.URIToPath(input.TextDocument.URI)
+	document, err := s.documentPathFor(input.TextDocument.URI)
 	if err != nil {
 		return nil, fmt.Errorf("invalid textDocument/codeLens document URI: %w", err)
 	}
-	moduleDir, err := analysis.FindModuleRoot(filename, s.workspaceRootFor(filename))
+	filename := document.filename
+	scope, err := s.analysisScopeFor(filename)
 	if errors.Is(err, analysis.ErrNoModule) {
 		return []codeLens{}, nil
 	}
 	if err != nil {
-		return []codeLens{}, nil
+		return []codeLens{}, nil //nolint:nilerr // Scope discovery failures suppress optional lenses without disrupting editing.
 	}
-	snapshot, err := s.snapshotForModule(ctx, moduleDir)
+	snapshot, err := s.snapshotForScope(ctx, scope)
 	if err != nil {
-		return []codeLens{}, nil
+		return []codeLens{}, nil //nolint:nilerr // Analysis failures suppress optional lenses without disrupting editing.
 	}
 
-	canonicalURI, err := analysis.PathToURI(filename)
-	if err != nil {
-		return []codeLens{}, nil
-	}
+	canonicalURI := document.uri
 	semanticLenses := snapshot.Lenses(canonicalURI)
 	result := make([]codeLens, 0, len(semanticLenses))
 	for _, semanticLens := range semanticLenses {
@@ -294,32 +298,271 @@ func (s *serverState) semanticCodeLenses(ctx context.Context, params json.RawMes
 	return result, nil
 }
 
-func (s *serverState) snapshotForModule(ctx context.Context, moduleDir string) (analysis.Snapshot, error) {
-	generation := s.documents.Generation()
-	s.cacheMu.RLock()
-	cached, ok := s.snapshots[moduleDir]
-	s.cacheMu.RUnlock()
-	if ok && cached.generation == generation {
-		return cached.snapshot, nil
+func (s *serverState) documentPathFor(uri string) (documentPath, error) {
+	s.metadataMu.RLock()
+	cached, ok := s.documentPaths[uri]
+	s.metadataMu.RUnlock()
+	if ok {
+		return cached, nil
 	}
 
-	snapshot, err := analysis.AnalyzeModule(ctx, moduleDir, s.documents.Overlay(moduleDir))
+	filename, err := analysis.URIToPath(uri)
+	if err != nil {
+		return documentPath{}, err
+	}
+	canonicalURI, err := analysis.PathToURI(filename)
+	if err != nil {
+		return documentPath{}, err
+	}
+	if canonicalURI == uri {
+		canonicalURI = uri
+	}
+	resolved := documentPath{filename: filename, uri: canonicalURI}
+
+	s.metadataMu.Lock()
+	if existing, loaded := s.documentPaths[uri]; loaded {
+		s.metadataMu.Unlock()
+		return existing, nil
+	}
+	s.documentPaths[uri] = resolved
+	s.metadataMu.Unlock()
+	return resolved, nil
+}
+
+func (s *serverState) forgetDocumentPath(uri string) {
+	s.metadataMu.Lock()
+	delete(s.documentPaths, uri)
+	s.metadataMu.Unlock()
+}
+
+func (s *serverState) analysisScopeFor(filename string) (analysis.AnalysisScope, error) {
+	key := analysisScopeCacheKey{
+		directory:     filepath.Dir(filename),
+		workspaceRoot: s.workspaceRootFor(filename),
+	}
+	s.metadataMu.RLock()
+	cached, ok := s.analysisScopes[key]
+	s.metadataMu.RUnlock()
+	if ok {
+		return cached.scope, cached.err
+	}
+
+	scope, err := s.findScope(filename, key.workspaceRoot)
+	if err != nil && !errors.Is(err, analysis.ErrNoModule) {
+		return analysis.AnalysisScope{}, err
+	}
+	s.metadataMu.Lock()
+	if existing, loaded := s.analysisScopes[key]; loaded {
+		s.metadataMu.Unlock()
+		return existing.scope, existing.err
+	}
+	s.analysisScopes[key] = cachedAnalysisScope{scope: scope, err: err}
+	s.metadataMu.Unlock()
+	return scope, err
+}
+
+func (s *serverState) invalidateAnalysisScopes() {
+	s.metadataMu.Lock()
+	clear(s.analysisScopes)
+	s.metadataMu.Unlock()
+}
+
+func (s *serverState) handleWatchedFiles(params json.RawMessage) {
+	paths, err := watchedFilePaths(params)
+	if err != nil {
+		s.invalidateAnalysisScopes()
+		s.invalidateAllSnapshots()
+		return
+	}
+	if slices.ContainsFunc(paths, isModuleMetadataPath) {
+		s.invalidateAnalysisScopes()
+	}
+	s.invalidateSnapshotsForPaths(paths)
+}
+
+func watchedFilePaths(params json.RawMessage) ([]string, error) {
+	var input didChangeWatchedFilesParams
+	if err := json.Unmarshal(params, &input); err != nil {
+		return nil, fmt.Errorf("decode watched file changes: %w", err)
+	}
+	paths := make([]string, 0, len(input.Changes))
+	for _, change := range input.Changes {
+		path, err := analysis.URIToPath(change.URI)
+		if err != nil {
+			return nil, fmt.Errorf("decode watched file URI: %w", err)
+		}
+		paths = append(paths, path)
+	}
+	return paths, nil
+}
+
+func isModuleMetadataPath(path string) bool {
+	base := filepath.Base(path)
+	return base == "go.mod" || base == "go.work"
+}
+
+func (s *serverState) snapshotForScope(ctx context.Context, scope analysis.AnalysisScope) (analysis.Snapshot, error) {
+	cacheKey := scope.CacheKey()
+	cached, revision, ok := s.cachedSnapshotForScope(scope)
+	if ok {
+		return cached, nil
+	}
+
+	result, err, _ := s.analysisGroup.Do(cacheKey+"\x00"+strconv.FormatUint(revision, 10), func() (any, error) {
+		cached, currentRevision, ok := s.cachedSnapshotForScope(scope)
+		if ok {
+			return cached, nil
+		}
+		if currentRevision != revision {
+			return s.snapshotForScope(ctx, scope)
+		}
+
+		snapshot, analyzeErr := s.analyzeScope(ctx, scope, s.documents.OverlayForRoots(scope.ModuleRoots))
+		if analyzeErr != nil {
+			return analysis.Snapshot{}, analyzeErr
+		}
+		s.storeSnapshot(scope, revision, snapshot)
+		return snapshot, nil
+	})
 	if err != nil {
 		return analysis.Snapshot{}, err
 	}
-	if s.documents.Generation() == generation {
-		s.cacheMu.Lock()
-		s.snapshots[moduleDir] = cachedSnapshot{generation: generation, snapshot: snapshot}
-		s.cacheMu.Unlock()
+	snapshot, ok := result.(analysis.Snapshot)
+	if !ok {
+		return analysis.Snapshot{}, fmt.Errorf("analysis flight returned %T, want analysis.Snapshot", result)
 	}
 	return snapshot, nil
+}
+
+func (s *serverState) cachedSnapshotForScope(scope analysis.AnalysisScope) (analysis.Snapshot, uint64, bool) {
+	cacheKey := scope.CacheKey()
+	s.cacheMu.RLock()
+	cached, ok := s.snapshots[cacheKey]
+	if ok && cached.valid && cached.snapshotRevision == cached.revision {
+		s.cacheMu.RUnlock()
+		return cached.snapshot, cached.revision, true
+	}
+	if ok && sameAnalysisScope(cached.scope, scope) {
+		s.cacheMu.RUnlock()
+		return analysis.Snapshot{}, cached.revision, false
+	}
+	s.cacheMu.RUnlock()
+
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+
+	cached, ok = s.snapshots[cacheKey]
+	if !ok {
+		cached.scope = scope
+		s.snapshots[cacheKey] = cached
+		return analysis.Snapshot{}, cached.revision, false
+	}
+	if !sameAnalysisScope(cached.scope, scope) {
+		cached.scope = scope
+		cached = invalidateCachedSnapshot(cached)
+		s.snapshots[cacheKey] = cached
+		return analysis.Snapshot{}, cached.revision, false
+	}
+	if cached.valid && cached.snapshotRevision == cached.revision {
+		return cached.snapshot, cached.revision, true
+	}
+	return analysis.Snapshot{}, cached.revision, false
+}
+
+func (s *serverState) storeSnapshot(scope analysis.AnalysisScope, revision uint64, snapshot analysis.Snapshot) {
+	cacheKey := scope.CacheKey()
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	cached, ok := s.snapshots[cacheKey]
+	if !ok || cached.revision != revision || !sameAnalysisScope(cached.scope, scope) {
+		return
+	}
+	cached.snapshot = snapshot
+	cached.snapshotRevision = revision
+	cached.valid = true
+	s.snapshots[cacheKey] = cached
+}
+
+func (s *serverState) invalidateSnapshotsForPath(path string) {
+	s.invalidateSnapshotsForPaths([]string{path})
+}
+
+func (s *serverState) invalidateSnapshotsForPaths(paths []string) {
+	if len(paths) == 0 {
+		return
+	}
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	for cacheKey, cached := range s.snapshots {
+		containsChangedPath := false
+		for _, path := range paths {
+			if analysisScopeContainsPath(cached.scope, path) {
+				containsChangedPath = true
+				break
+			}
+		}
+		if !containsChangedPath {
+			continue
+		}
+		cached = invalidateCachedSnapshot(cached)
+		s.snapshots[cacheKey] = cached
+	}
+}
+
+func (s *serverState) invalidateAllSnapshots() {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	for cacheKey, cached := range s.snapshots {
+		cached = invalidateCachedSnapshot(cached)
+		s.snapshots[cacheKey] = cached
+	}
+}
+
+func invalidateCachedSnapshot(cached cachedSnapshot) cachedSnapshot {
+	cached.revision++
+	cached.snapshotRevision = 0
+	cached.valid = false
+	// Keep the revision tombstone so a new request cannot join obsolete
+	// single-flight work, but release the potentially large semantic graph
+	// immediately.
+	cached.snapshot = analysis.Snapshot{}
+	return cached
+}
+
+func analysisScopeContainsPath(scope analysis.AnalysisScope, path string) bool {
+	if scope.WorkFile != "" && path == scope.WorkFile {
+		return true
+	}
+	for _, root := range scope.ModuleRoots {
+		if pathWithinRoot(path, root) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameAnalysisScope(left, right analysis.AnalysisScope) bool {
+	if left.Root != right.Root || left.WorkFile != right.WorkFile ||
+		len(left.ModuleRoots) != len(right.ModuleRoots) || len(left.Patterns) != len(right.Patterns) {
+		return false
+	}
+	for index := range left.ModuleRoots {
+		if left.ModuleRoots[index] != right.ModuleRoots[index] {
+			return false
+		}
+	}
+	for index := range left.Patterns {
+		if left.Patterns[index] != right.Patterns[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *serverState) workspaceRootFor(filename string) string {
 	var best string
 	for _, root := range s.workspaceRoots {
-		relative, err := filepath.Rel(root, filename)
-		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		if filename != root && !pathWithinRoot(filename, root) {
 			continue
 		}
 		if len(root) > len(best) {

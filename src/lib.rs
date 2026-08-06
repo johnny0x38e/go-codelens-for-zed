@@ -1,19 +1,21 @@
+//! Zed extension adapter for launching the Go CodeLens language server.
+
 use zed_extension_api::{self as zed, Result};
 
-struct GoImplementationLensExtension;
+struct GoCodeLensExtension;
 
-impl GoImplementationLensExtension {
+impl GoCodeLensExtension {
     fn ensure_supported_platform() -> Result<()> {
         match zed::current_platform() {
             (zed::Os::Mac, zed::Architecture::Aarch64) => Ok(()),
             (os, architecture) => Err(format!(
-                "Go Implementation Lens currently supports macOS on Apple Silicon only; got {os:?}/{architecture:?}"
+                "Go CodeLens currently supports macOS on Apple Silicon only; got {os:?}/{architecture:?}"
             )),
         }
     }
 }
 
-impl zed::Extension for GoImplementationLensExtension {
+impl zed::Extension for GoCodeLensExtension {
     fn new() -> Self {
         Self
     }
@@ -26,9 +28,9 @@ impl zed::Extension for GoImplementationLensExtension {
         Self::ensure_supported_platform()?;
 
         let command = worktree
-            .which("go-implementation-lens-ls")
+            .which("go-codelens-ls")
             .ok_or_else(|| {
-                "go-implementation-lens-ls was not found on Zed's workspace PATH. Run ./scripts/install-server.sh, then restart the language server"
+                "go-codelens-ls was not found on Zed's workspace PATH. Run ./scripts/install-server.sh, then restart the language server"
                     .to_owned()
             })?;
 
@@ -40,4 +42,4 @@ impl zed::Extension for GoImplementationLensExtension {
     }
 }
 
-zed::register_extension!(GoImplementationLensExtension);
+zed::register_extension!(GoCodeLensExtension);

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -40,6 +41,73 @@ func TestServeReturnsLensesForRepositoryFixtureWithoutDidOpen(t *testing.T) {
 	_ = findSemanticTestLens(t, lenses, "2 implementations", 4)
 	_ = findSemanticTestLens(t, lenses, "Implements: Greeter", 8)
 	_ = findSemanticTestLens(t, lenses, "Implements: Greeter", 16)
+}
+
+func TestServeAnalyzesAllGoWorkModules(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	contractModule := filepath.Join(workspaceRoot, "contract")
+	appModule := filepath.Join(workspaceRoot, "app")
+	if err := os.MkdirAll(contractModule, 0o700); err != nil {
+		t.Fatalf("os.MkdirAll(%q) error = %v", contractModule, err)
+	}
+	if err := os.MkdirAll(appModule, 0o700); err != nil {
+		t.Fatalf("os.MkdirAll(%q) error = %v", appModule, err)
+	}
+	writeSemanticTestFile(t, filepath.Join(workspaceRoot, "go.work"), []byte("go 1.26\n\nuse (\n\t./contract\n\t./app\n)\n"))
+	writeSemanticTestFile(t, filepath.Join(contractModule, "go.mod"), []byte("module example.com/contract\n\ngo 1.26\n"))
+	writeSemanticTestFile(t, filepath.Join(appModule, "go.mod"), []byte("module example.com/app\n\ngo 1.26\n"))
+	contractSource := []byte(`package contract
+
+type Greeter interface {
+	Greet() string
+}
+
+func Welcome(g Greeter) string { return g.Greet() }
+`)
+	appSource := []byte(`package app
+
+import "example.com/contract"
+
+type Person struct{}
+
+func (Person) Greet() string { return "hello" }
+
+func Use() string { return contract.Welcome(Person{}) }
+`)
+	contractFilename := filepath.Join(contractModule, "contract.go")
+	appFilename := filepath.Join(appModule, "app.go")
+	writeSemanticTestFile(t, contractFilename, contractSource)
+	writeSemanticTestFile(t, appFilename, appSource)
+
+	contractURI := semanticTestFileURI(contractFilename)
+	appURI := semanticTestFileURI(appFilename)
+	input := new(bytes.Buffer)
+	writeTestFrame(t, input, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+		"params":  map[string]any{"rootUri": semanticTestFileURI(workspaceRoot)},
+	})
+	writeSemanticTestCodeLensRequest(t, input, 2, contractURI)
+	writeSemanticTestCodeLensRequest(t, input, 3, appURI)
+	writeTestFrame(t, input, map[string]any{"jsonrpc": "2.0", "method": "exit"})
+
+	output := new(bytes.Buffer)
+	if err := Serve(context.Background(), input, output); err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+
+	reader := bufio.NewReader(output)
+	_ = readTestFrame(t, reader)
+	contractLenses := semanticTestResponseLenses(t, readTestFrame(t, reader))
+	appLenses := semanticTestResponseLenses(t, readTestFrame(t, reader))
+
+	interfaceLens := findSemanticTestLens(t, contractLenses, "1 implementation", 2)
+	assertSemanticTestTargets(t, interfaceLens, appURI, 4, 5)
+	welcomeReferences := findSemanticTestLens(t, contractLenses, "1 reference", 6)
+	assertSemanticTestTargets(t, welcomeReferences, appURI, 8, 36)
+	personLens := findSemanticTestLens(t, appLenses, "Implements: Greeter", 4)
+	assertSemanticTestTargets(t, personLens, contractURI, 2, 5)
 }
 
 func TestServeReturnsSemanticTypeLenses(t *testing.T) {
@@ -124,10 +192,10 @@ func (Broken) Greet(prefix string) string { return prefix }
 
 	for _, value := range lenses {
 		lens, ok := value.(map[string]any)
-		if !ok || semanticTestStartLine(lens["range"]) != 10 {
+		if !ok || semanticTestStartLine(lens["range"]) != 10 || !semanticTestIsImplementationLens(lens) {
 			continue
 		}
-		t.Fatalf("Broken received unexpected CodeLens: %#v", lens)
+		t.Fatalf("Broken received unexpected implementation CodeLens: %#v", lens)
 	}
 }
 
@@ -250,10 +318,138 @@ func (WrongStore) Get(key string) error { return nil }
 
 	for _, value := range storeLenses {
 		lens, ok := value.(map[string]any)
-		if ok && semanticTestStartLine(lens["range"]) == 14 {
-			t.Fatalf("WrongStore.Get received unexpected CodeLens: %#v", lens)
+		if ok && semanticTestStartLine(lens["range"]) == 14 && semanticTestIsImplementationLens(lens) {
+			t.Fatalf("WrongStore.Get received unexpected implementation CodeLens: %#v", lens)
 		}
 	}
+}
+
+func TestServeReturnsExactReferenceLenses(t *testing.T) {
+	moduleDir := t.TempDir()
+	contractSource := []byte(`package sample
+
+type Greeter interface {
+Greet() string
+}
+
+const Greeting = "hello"
+var Default Greeter
+
+func GreetAll(g Greeter) string {
+return g.Greet() + Greeting
+}
+
+func Identity[T any](value T) T { return value }
+
+type Unused struct{}
+
+func Uncalled() {}
+`)
+	implementationSource := []byte(`package sample
+
+type Person struct {
+Name string
+}
+
+func (p Person) Greet() string { return p.Name }
+
+func use() string {
+var g Greeter = Person{Name: "Zed"}
+Default = g
+Identity(g)
+return GreetAll(g) + Greeting + Person{}.Greet()
+}
+
+func (Person) UnusedMethod() {}
+`)
+	writeSemanticTestFile(t, filepath.Join(moduleDir, "go.mod"), []byte("module example.com/sample\n\ngo 1.26\n"))
+	contractFilename := filepath.Join(moduleDir, "contract.go")
+	implementationFilename := filepath.Join(moduleDir, "implementation.go")
+	writeSemanticTestFile(t, contractFilename, contractSource)
+	writeSemanticTestFile(t, implementationFilename, implementationSource)
+
+	contractURI := semanticTestFileURI(contractFilename)
+	implementationURI := semanticTestFileURI(implementationFilename)
+	input := new(bytes.Buffer)
+	writeTestFrame(t, input, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+		"params":  map[string]any{"rootUri": semanticTestFileURI(moduleDir)},
+	})
+	writeSemanticTestDidOpen(t, input, contractURI, contractSource)
+	writeSemanticTestDidOpen(t, input, implementationURI, implementationSource)
+	writeSemanticTestCodeLensRequest(t, input, 2, contractURI)
+	writeSemanticTestCodeLensRequest(t, input, 3, implementationURI)
+	writeTestFrame(t, input, map[string]any{"jsonrpc": "2.0", "method": "exit"})
+
+	output := new(bytes.Buffer)
+	if err := Serve(context.Background(), input, output); err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+
+	reader := bufio.NewReader(output)
+	_ = readTestFrame(t, reader)
+	contractLenses := semanticTestResponseLenses(t, readTestFrame(t, reader))
+	implementationLenses := semanticTestResponseLenses(t, readTestFrame(t, reader))
+
+	greeterReferences := findSemanticTestLens(t, contractLenses, "3 references", 2)
+	assertSemanticTestTargetStarts(t, greeterReferences,
+		semanticTestTarget{URI: contractURI, Line: 7, Character: 12},
+		semanticTestTarget{URI: contractURI, Line: 9, Character: 16},
+		semanticTestTarget{URI: implementationURI, Line: 9, Character: 6},
+	)
+	assertSemanticTestTitlesOnLine(t, contractLenses, 2, "3 references", "1 implementation")
+
+	methodReferences := findSemanticTestLens(t, contractLenses, "2 references", 3)
+	assertSemanticTestTargetStarts(t, methodReferences,
+		semanticTestTarget{URI: contractURI, Line: 10, Character: 9},
+		semanticTestTarget{URI: implementationURI, Line: 12, Character: 41},
+	)
+	greetingReferences := findSemanticTestLens(t, contractLenses, "2 references", 6)
+	assertSemanticTestTargetStarts(t, greetingReferences,
+		semanticTestTarget{URI: contractURI, Line: 10, Character: 19},
+		semanticTestTarget{URI: implementationURI, Line: 12, Character: 21},
+	)
+	defaultReferences := findSemanticTestLens(t, contractLenses, "1 reference", 7)
+	assertSemanticTestTargetStarts(t, defaultReferences,
+		semanticTestTarget{URI: implementationURI, Line: 10, Character: 0},
+	)
+	greetAllReferences := findSemanticTestLens(t, contractLenses, "1 reference", 9)
+	assertSemanticTestTargetStarts(t, greetAllReferences,
+		semanticTestTarget{URI: implementationURI, Line: 12, Character: 7},
+	)
+	identityReferences := findSemanticTestLens(t, contractLenses, "1 reference", 13)
+	assertSemanticTestTargetStarts(t, identityReferences,
+		semanticTestTarget{URI: implementationURI, Line: 11, Character: 0},
+	)
+	typeParameterReferences := findSemanticTestLens(t, contractLenses, "2 references", 13)
+	assertSemanticTestTargetStarts(t, typeParameterReferences,
+		semanticTestTarget{URI: contractURI, Line: 13, Character: 27},
+		semanticTestTarget{URI: contractURI, Line: 13, Character: 30},
+	)
+	_ = findSemanticTestLens(t, contractLenses, "0 references", 17)
+	assertSemanticTestNoReferenceLens(t, contractLenses, 15)
+
+	personReferences := findSemanticTestLens(t, implementationLenses, "4 references", 2)
+	assertSemanticTestTargetStarts(t, personReferences,
+		semanticTestTarget{URI: implementationURI, Line: 6, Character: 8},
+		semanticTestTarget{URI: implementationURI, Line: 9, Character: 16},
+		semanticTestTarget{URI: implementationURI, Line: 12, Character: 32},
+		semanticTestTarget{URI: implementationURI, Line: 15, Character: 6},
+	)
+	fieldReferences := findSemanticTestLens(t, implementationLenses, "2 references", 3)
+	assertSemanticTestTargetStarts(t, fieldReferences,
+		semanticTestTarget{URI: implementationURI, Line: 6, Character: 42},
+		semanticTestTarget{URI: implementationURI, Line: 9, Character: 23},
+	)
+	concreteMethodReferences := findSemanticTestLens(t, implementationLenses, "2 references", 6)
+	assertSemanticTestTargetStarts(t, concreteMethodReferences,
+		semanticTestTarget{URI: contractURI, Line: 10, Character: 9},
+		semanticTestTarget{URI: implementationURI, Line: 12, Character: 41},
+	)
+	_ = findSemanticTestLens(t, implementationLenses, "0 references", 8)
+	_ = findSemanticTestLens(t, implementationLenses, "0 references", 15)
 }
 
 func TestServeInvalidatesSemanticLensesForUnsavedSignatureChange(t *testing.T) {
@@ -329,7 +525,7 @@ func (Person) Greet() string { return "hello" }
 			continue
 		}
 		line := semanticTestStartLine(lens["range"])
-		if line == 6 || line == 8 {
+		if (line == 6 || line == 8) && semanticTestIsImplementationLens(lens) {
 			t.Fatalf("stale implementation CodeLens remains after didChange: %#v", lens)
 		}
 	}
@@ -397,6 +593,65 @@ func findSemanticTestLens(t *testing.T, lenses []any, title string, line int) ma
 	}
 	t.Fatalf("no CodeLens titled %q on line %d in %#v", title, line, lenses)
 	return nil
+}
+
+func assertSemanticTestTitlesOnLine(t *testing.T, lenses []any, line int, expected ...string) {
+	t.Helper()
+	var titles []string
+	for _, value := range lenses {
+		lens, ok := value.(map[string]any)
+		if !ok || semanticTestStartLine(lens["range"]) != line {
+			continue
+		}
+		command, ok := lens["command"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if title, ok := command["title"].(string); ok {
+			titles = append(titles, title)
+		}
+	}
+	if len(titles) != len(expected) {
+		t.Fatalf("CodeLens titles on line %d = %#v, want %#v", line, titles, expected)
+	}
+	for i := range expected {
+		if titles[i] != expected[i] {
+			t.Fatalf("CodeLens titles on line %d = %#v, want %#v", line, titles, expected)
+		}
+	}
+}
+
+func assertSemanticTestNoReferenceLens(t *testing.T, lenses []any, line int) {
+	t.Helper()
+	for _, value := range lenses {
+		lens, ok := value.(map[string]any)
+		if !ok || semanticTestStartLine(lens["range"]) != line {
+			continue
+		}
+		command, ok := lens["command"].(map[string]any)
+		if !ok {
+			continue
+		}
+		title, ok := command["title"].(string)
+		if !ok {
+			continue
+		}
+		if strings.HasSuffix(title, " reference") || strings.HasSuffix(title, " references") {
+			t.Fatalf("unexpected reference CodeLens on line %d: %#v", line, lens)
+		}
+	}
+}
+
+func semanticTestIsImplementationLens(lens map[string]any) bool {
+	command, ok := lens["command"].(map[string]any)
+	if !ok {
+		return false
+	}
+	title, ok := command["title"].(string)
+	if !ok {
+		return false
+	}
+	return strings.Contains(title, " impl") || strings.HasPrefix(title, "Implements:")
 }
 
 func assertSemanticTestRangeStart(t *testing.T, value any, line, character float64) {

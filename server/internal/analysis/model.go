@@ -18,11 +18,22 @@ type Location struct {
 	Range Range  `json:"range"`
 }
 
+// LensKind determines stable ordering for lenses on the same declaration.
+type LensKind uint8
+
+const (
+	// LensKindReferences identifies a declaration-reference relationship.
+	LensKindReferences LensKind = iota
+	// LensKindImplementations identifies an interface-implementation relationship.
+	LensKindImplementations
+)
+
 // Lens is a semantic relationship rendered as an LSP CodeLens.
 type Lens struct {
 	Range   Range
 	Title   string
 	Targets []Location
+	Kind    LensKind
 }
 
 // Snapshot is an immutable set of semantic lenses grouped by document URI.
@@ -34,14 +45,8 @@ func newSnapshot(lensesByURI map[string][]Lens) Snapshot {
 	return Snapshot{lensesByURI: lensesByURI}
 }
 
-// Lenses returns defensive copies of the lenses and their navigation targets.
+// Lenses returns an immutable view of the lenses for uri. The returned slice
+// and its navigation targets are owned by the Snapshot and must not be modified.
 func (s Snapshot) Lenses(uri string) []Lens {
-	lenses := s.lensesByURI[uri]
-	result := make([]Lens, len(lenses))
-	for i, lens := range lenses {
-		result[i] = lens
-		result[i].Targets = make([]Location, len(lens.Targets))
-		copy(result[i].Targets, lens.Targets)
-	}
-	return result
+	return s.lensesByURI[uri]
 }
