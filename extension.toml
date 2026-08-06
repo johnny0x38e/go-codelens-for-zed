@@ -1,7 +1,7 @@
 id = "go-implementation-lens"
 name = "Go Implementation Lens"
 description = "Shows Go interface implementations and references as CodeLens entries."
-version = "0.0.1"
+version = "0.1.0"
 schema_version = 1
 authors = ["Johnny"]
 repository = "https://github.com/Johnny0x38E/go-implementation-lens-for-zed"

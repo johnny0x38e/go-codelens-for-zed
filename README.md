@@ -1,28 +1,39 @@
 # Go Implementation Lens for Zed
 
-An experimental Zed extension that adds Go implementation information through an auxiliary Language Server Protocol (LSP) server. The current milestone is a thin end-to-end proof of concept: it proves that Zed can load the extension, run a native Go sidecar alongside `gopls`, render a CodeLens, and execute the standard `editor.action.showReferences` command.
+A Zed extension that shows exact Go interface implementation relationships as CodeLens entries. It runs a small native Go language server alongside `gopls`; `gopls` remains Zed's primary Go language server.
 
-The CodeLens is static in this milestone. Go-aware interface and implementation analysis is the next milestone.
+## Features
+
+For the active Go module, the extension shows:
+
+- `N implementations` on named interfaces, linked to the implementing named types.
+- `Implements: Interface` on named types, linked back to their interfaces.
+- `N implementations` on explicit interface methods, linked to matching receiver methods.
+- `Implements: Interface.Method` on receiver methods, including useful matches on partial implementations.
+
+Full interface relationships use `go/types.Implements`, including pointer method sets, so a type is never reported as a complete implementation from method names alone. Method relationships require the same Go method identity and a `types.Identical` signature; methods with the right name but wrong parameters or results are excluded.
+
+The server consumes Zed's full-text document notifications, so unsaved edits immediately invalidate and recompute the affected semantic snapshot. Lens titles and navigation targets are deterministic, and source positions use LSP UTF-16 offsets.
 
 ## Architecture
 
-The extension has two small parts:
+The extension has two parts:
 
-- `src/lib.rs` is a Rust/Wasm Zed adapter. It registers the auxiliary language server and launches its native executable.
-- `server/` is the Go LSP sidecar. It currently implements `initialize`, `shutdown`, `exit`, and `textDocument/codeLens` over stdio.
+- `src/lib.rs` is the Rust/Wasm Zed adapter. It registers the auxiliary language server and locates its native executable on the worktree `PATH`.
+- `server/` is the Go LSP sidecar. It uses `golang.org/x/tools/go/packages`, `go/ast`, and `go/types` to analyze the module containing the requested document.
 
-Keeping semantic analysis in Go lets the production implementation use Go-native package and type information while the Zed-specific layer stays minimal.
+The sidecar deliberately does not proxy or replace `gopls`. The proof of concept established that Zed can run both language servers for Go, so keeping them independent avoids forwarding every gopls capability and keeps this extension focused on implementation lenses.
 
-## Run the proof of concept
+## Install the development extension
 
 Requirements:
 
 - Zed 1.14.2 or newer
 - Go 1.26 or newer for this checkout
 - Rust installed with `rustup`; Zed extensions use the `wasm32-wasip2` target
-- macOS on Apple Silicon for the current development build script
+- Apple Silicon macOS for the current native development build script
 
-Build and install the native sidecar into `~/.local/bin`, which is already on the Zed workspace `PATH` in the tested setup:
+Build and install the native sidecar into `~/.local/bin`:
 
 ```sh
 ./scripts/install-server.sh
@@ -30,9 +41,9 @@ Build and install the native sidecar into `~/.local/bin`, which is already on th
 
 Set `GO_IMPLEMENTATION_LENS_BIN_DIR` if Zed inherits a different directory on `PATH`.
 
-In Zed, run `zed: install dev extension` and choose this repository. Then open `examples/poc/main.go` from this repository.
+In Zed, run `zed: install dev extension` and choose this repository. If it is already installed, run `zed: rebuild dev extension`. Then open `examples/poc/main.go` from this repository. Reopen or reload the workspace if Zed stopped the old sidecar without restarting it.
 
-The checked-in `.zed/settings.json` enables inline CodeLens and starts both servers for Go:
+The checked-in `.zed/settings.json` enables inline CodeLens and keeps both Go servers active:
 
 ```json
 {
@@ -45,29 +56,33 @@ The checked-in `.zed/settings.json` enables inline CodeLens and starts both serv
 }
 ```
 
-`"..."` is Zed's language-server wildcard: it retains any other Go servers that are registered but not named explicitly.
+`"..."` retains any other Go language servers registered with Zed.
 
-When the proof of concept is running, `Go Implementation Lens: POC` appears above the `Greeter` interface declaration. Activating it invokes Zed's references navigation with the location returned by the sidecar; the cursor moves to the declaration. `gopls` remains enabled as the primary Go server. The root `go.work` includes both Go modules so `gopls` can load this checkout as a workspace.
+The example should show:
 
-This flow was verified end to end on Zed 1.14.2 for Apple Silicon macOS: Zed started both `gopls` and `go-implementation-lens-ls`, sent `textDocument/codeLens`, rendered the returned title, and executed the returned `editor.action.showReferences` command. In this Zed version a Lens anchored at `(0, 0)` is not visible above the first line, so the fixture deliberately anchors the static Lens at the interface declaration.
+- `2 implementations` on `Greeter` and `Greeter.Greet`.
+- `Implements: Greeter` on `Person` and `Robot`.
+- `Implements: Greeter.Greet` on both correct `Greet` methods.
+- No implementation Lens on `BrokenGreeter` or its incompatible `Greet(int)` method.
 
-The three Zed display modes were also checked with this fixture: `on` renders the title inline, `off` hides it, and `menu` renders the single available action and executes it when clicked. The checked-in setting is restored to `on`.
+Activating a Lens invokes Zed's standard `editor.action.showReferences` command. A single target navigates directly; multiple targets open Zed's references results.
 
-After rebuilding a loaded dev extension with `zed: rebuild dev extension`, reopen or reload the workspace if the sidecar was stopped but not restarted automatically.
-
-## Verify the two build seams
+## Verify the build seams
 
 ```sh
 cd server
-env TMPDIR=/tmp GOCACHE=/tmp/go-build-cache go test ./...
+env GOWORK=off TMPDIR=/tmp GOCACHE=/tmp/go-build-cache go test -race ./...
 cd ..
-cargo check --target wasm32-wasip2
+cargo fmt -- --check
+cargo build --target wasm32-wasip2
+./scripts/install-server.sh
 ```
 
 ## Current limitations
 
-- The server returns one static CodeLens at a fixed location in every Go document; it does not yet inspect Go syntax or types.
-- The static POC range is fixed to line 5 (LSP line 4), matching `examples/poc/main.go`; shorter files may clip that range. The semantic milestone will calculate ranges from real declarations.
-- The development build only targets Apple Silicon macOS.
-- The native sidecar is deliberately ignored by Git. The proof of concept locates it on `PATH`; Zed's extension publishing rules require language-server extensions to download their server or locate it on `PATH` rather than commit the binary into the extension repository.
-- Packaging, updates, checksums, additional platforms, and the final license choice are outside this proof-of-concept milestone.
+- Analysis is scoped to the Go module containing the requested document. Imported dependencies provide type information but do not receive Lens entries.
+- Empty interfaces report zero implementations instead of treating every named type as a useful target.
+- Method Lens entries cover explicit interface method declarations and explicit receiver method declarations. Complete interface/type relationships still account for embedded and promoted methods through `go/types`.
+- Zed's current extension API does not expose the VSCode extension's custom gutter decorations or tree-view sidebar. Their relationship data is represented through navigable CodeLens entries where possible.
+- The development build script currently targets Apple Silicon macOS. Publishing requires platform downloads, checksums, updates, and a final license choice.
+- Native binaries and `extension.wasm` are intentionally not committed.

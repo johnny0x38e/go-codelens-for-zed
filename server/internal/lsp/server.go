@@ -7,8 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+
+	"github.com/johnny/go-implementation-lens-for-zed/server/internal/analysis"
 )
 
 const jsonRPCVersion = "2.0"
@@ -32,6 +36,29 @@ type responseError struct {
 	Message string `json:"message"`
 }
 
+type serverState struct {
+	workspaceRoots []string
+	documents      *documentStore
+	cacheMu        sync.RWMutex
+	snapshots      map[string]cachedSnapshot
+}
+
+type cachedSnapshot struct {
+	generation uint64
+	snapshot   analysis.Snapshot
+}
+
+type codeLens struct {
+	Range   analysis.Range `json:"range"`
+	Command command        `json:"command"`
+}
+
+type command struct {
+	Title     string `json:"title"`
+	Command   string `json:"command"`
+	Arguments []any  `json:"arguments,omitempty"`
+}
+
 // Serve handles Language Server Protocol messages until the client sends exit
 // or the input stream reaches EOF.
 func Serve(ctx context.Context, in io.Reader, out io.Writer) error {
@@ -42,6 +69,7 @@ func Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 // trace stream is diagnostic only: write failures never interrupt LSP traffic.
 func ServeWithTrace(ctx context.Context, in io.Reader, out io.Writer, trace io.Writer) error {
 	reader := bufio.NewReader(in)
+	state := newServerState()
 	for {
 		select {
 		case <-ctx.Done():
@@ -66,12 +94,14 @@ func ServeWithTrace(ctx context.Context, in io.Reader, out io.Writer, trace io.W
 			return nil
 		}
 		if len(message.ID) == 0 {
+			state.handleNotification(message.Method, message.Params)
 			continue
 		}
 
 		var reply response
 		switch message.Method {
 		case "initialize":
+			state.initialize(message.Params)
 			reply = response{
 				JSONRPC: jsonRPCVersion,
 				ID:      message.ID,
@@ -84,12 +114,12 @@ func ServeWithTrace(ctx context.Context, in io.Reader, out io.Writer, trace io.W
 					},
 					"serverInfo": map[string]any{
 						"name":    "go-implementation-lens-ls",
-						"version": "0.0.1-poc",
+						"version": "0.1.0",
 					},
 				},
 			}
 		case "textDocument/codeLens":
-			result, err := staticCodeLens(message.Params)
+			result, err := state.semanticCodeLenses(ctx, message.Params)
 			if err != nil {
 				reply = response{
 					JSONRPC: jsonRPCVersion,
@@ -130,6 +160,13 @@ func ServeWithTrace(ctx context.Context, in io.Reader, out io.Writer, trace io.W
 	}
 }
 
+func newServerState() *serverState {
+	return &serverState{
+		documents: newDocumentStore(),
+		snapshots: make(map[string]cachedSnapshot),
+	}
+}
+
 func traceMethod(trace io.Writer, direction, method string) {
 	if trace == nil {
 		return
@@ -137,7 +174,74 @@ func traceMethod(trace io.Writer, direction, method string) {
 	_, _ = fmt.Fprintf(trace, "%s %s\n", direction, method)
 }
 
-func staticCodeLens(params json.RawMessage) ([]any, error) {
+func (s *serverState) initialize(params json.RawMessage) {
+	var input struct {
+		RootURI          string `json:"rootUri"`
+		WorkspaceFolders []struct {
+			URI string `json:"uri"`
+		} `json:"workspaceFolders"`
+	}
+	if err := json.Unmarshal(params, &input); err != nil {
+		return
+	}
+
+	seen := make(map[string]struct{})
+	addRoot := func(rawURI string) {
+		path, err := analysis.URIToPath(rawURI)
+		if err != nil {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		s.workspaceRoots = append(s.workspaceRoots, path)
+	}
+	for _, folder := range input.WorkspaceFolders {
+		addRoot(folder.URI)
+	}
+	addRoot(input.RootURI)
+}
+
+func (s *serverState) handleNotification(method string, params json.RawMessage) {
+	switch method {
+	case "textDocument/didOpen":
+		var input struct {
+			TextDocument struct {
+				URI  string `json:"uri"`
+				Text string `json:"text"`
+			} `json:"textDocument"`
+		}
+		if json.Unmarshal(params, &input) == nil {
+			s.documents.Open(input.TextDocument.URI, input.TextDocument.Text)
+		}
+	case "textDocument/didChange":
+		var input struct {
+			TextDocument struct {
+				URI string `json:"uri"`
+			} `json:"textDocument"`
+			ContentChanges []struct {
+				Text string `json:"text"`
+			} `json:"contentChanges"`
+		}
+		if json.Unmarshal(params, &input) == nil && len(input.ContentChanges) > 0 {
+			s.documents.Change(input.TextDocument.URI, input.ContentChanges[len(input.ContentChanges)-1].Text)
+		}
+	case "textDocument/didClose":
+		var input struct {
+			TextDocument struct {
+				URI string `json:"uri"`
+			} `json:"textDocument"`
+		}
+		if json.Unmarshal(params, &input) == nil {
+			s.documents.Close(input.TextDocument.URI)
+		}
+	case "textDocument/didSave", "workspace/didChangeWatchedFiles":
+		s.documents.Invalidate()
+	}
+}
+
+func (s *serverState) semanticCodeLenses(ctx context.Context, params json.RawMessage) ([]codeLens, error) {
 	var input struct {
 		TextDocument struct {
 			URI string `json:"uri"`
@@ -150,27 +254,79 @@ func staticCodeLens(params json.RawMessage) ([]any, error) {
 		return nil, errors.New("textDocument/codeLens params must include textDocument.uri")
 	}
 
-	position := map[string]any{"line": 4, "character": 0}
-	rangeValue := map[string]any{"start": position, "end": position}
-	location := map[string]any{
-		"uri":   input.TextDocument.URI,
-		"range": rangeValue,
+	filename, err := analysis.URIToPath(input.TextDocument.URI)
+	if err != nil {
+		return nil, fmt.Errorf("invalid textDocument/codeLens document URI: %w", err)
+	}
+	moduleDir, err := analysis.FindModuleRoot(filename, s.workspaceRootFor(filename))
+	if errors.Is(err, analysis.ErrNoModule) {
+		return []codeLens{}, nil
+	}
+	if err != nil {
+		return []codeLens{}, nil
+	}
+	snapshot, err := s.snapshotForModule(ctx, moduleDir)
+	if err != nil {
+		return []codeLens{}, nil
 	}
 
-	return []any{
-		map[string]any{
-			"range": rangeValue,
-			"command": map[string]any{
-				"title":   "Go Implementation Lens: POC",
-				"command": "editor.action.showReferences",
-				"arguments": []any{
-					input.TextDocument.URI,
-					position,
-					[]any{location},
-				},
+	canonicalURI, err := analysis.PathToURI(filename)
+	if err != nil {
+		return []codeLens{}, nil
+	}
+	semanticLenses := snapshot.Lenses(canonicalURI)
+	result := make([]codeLens, 0, len(semanticLenses))
+	for _, semanticLens := range semanticLenses {
+		lensCommand := command{
+			Title:   semanticLens.Title,
+			Command: "editor.action.showReferences",
+			Arguments: []any{
+				canonicalURI,
+				semanticLens.Range.Start,
+				semanticLens.Targets,
 			},
-		},
-	}, nil
+		}
+		result = append(result, codeLens{
+			Range:   semanticLens.Range,
+			Command: lensCommand,
+		})
+	}
+	return result, nil
+}
+
+func (s *serverState) snapshotForModule(ctx context.Context, moduleDir string) (analysis.Snapshot, error) {
+	generation := s.documents.Generation()
+	s.cacheMu.RLock()
+	cached, ok := s.snapshots[moduleDir]
+	s.cacheMu.RUnlock()
+	if ok && cached.generation == generation {
+		return cached.snapshot, nil
+	}
+
+	snapshot, err := analysis.AnalyzeModule(ctx, moduleDir, s.documents.Overlay(moduleDir))
+	if err != nil {
+		return analysis.Snapshot{}, err
+	}
+	if s.documents.Generation() == generation {
+		s.cacheMu.Lock()
+		s.snapshots[moduleDir] = cachedSnapshot{generation: generation, snapshot: snapshot}
+		s.cacheMu.Unlock()
+	}
+	return snapshot, nil
+}
+
+func (s *serverState) workspaceRootFor(filename string) string {
+	var best string
+	for _, root := range s.workspaceRoots {
+		relative, err := filepath.Rel(root, filename)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if len(root) > len(best) {
+			best = root
+		}
+	}
+	return best
 }
 
 func readFrame(reader *bufio.Reader) ([]byte, error) {

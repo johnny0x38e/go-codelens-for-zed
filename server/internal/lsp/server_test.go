@@ -53,9 +53,44 @@ func TestServeInitialize(t *testing.T) {
 	if got := codeLensProvider["resolveProvider"]; got != false {
 		t.Fatalf("resolveProvider = %#v, want false", got)
 	}
+	serverInfo, ok := result["serverInfo"].(map[string]any)
+	if !ok {
+		t.Fatalf("serverInfo = %#v, want object", result["serverInfo"])
+	}
+	if got := serverInfo["version"]; got != "0.1.0" {
+		t.Fatalf("serverInfo.version = %#v, want 0.1.0", got)
+	}
 }
 
-func TestServeCodeLens(t *testing.T) {
+func TestServeCodeLensMalformedParamsReturnsInvalidParams(t *testing.T) {
+	input := new(bytes.Buffer)
+	writeTestFrame(t, input, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "textDocument/codeLens",
+		"params":  map[string]any{"textDocument": map[string]any{}},
+	})
+	writeTestFrame(t, input, map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "exit",
+	})
+
+	output := new(bytes.Buffer)
+	if err := Serve(context.Background(), input, output); err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+
+	response := readTestFrame(t, output)
+	errorValue, ok := response["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("error = %#v, want object", response["error"])
+	}
+	if got := errorValue["code"]; got != float64(-32602) {
+		t.Fatalf("error code = %#v, want -32602", got)
+	}
+}
+
+func TestServeCodeLensOutsideModuleReturnsEmpty(t *testing.T) {
 	const uri = "file:///workspace/main.go"
 
 	input := new(bytes.Buffer)
@@ -82,43 +117,9 @@ func TestServeCodeLens(t *testing.T) {
 		t.Fatalf("response id = %#v, want 2", got)
 	}
 	lenses, ok := response["result"].([]any)
-	if !ok || len(lenses) != 1 {
-		t.Fatalf("result = %#v, want one CodeLens", response["result"])
+	if !ok || len(lenses) != 0 {
+		t.Fatalf("result = %#v, want empty CodeLens array", response["result"])
 	}
-
-	lens, ok := lenses[0].(map[string]any)
-	if !ok {
-		t.Fatalf("lens = %#v, want object", lenses[0])
-	}
-	assertTestRange(t, lens["range"], 4, 0)
-	command, ok := lens["command"].(map[string]any)
-	if !ok {
-		t.Fatalf("command = %#v, want object", lens["command"])
-	}
-	if got := command["title"]; got != "Go Implementation Lens: POC" {
-		t.Fatalf("command title = %#v", got)
-	}
-	if got := command["command"]; got != "editor.action.showReferences" {
-		t.Fatalf("command id = %#v", got)
-	}
-
-	arguments, ok := command["arguments"].([]any)
-	if !ok || len(arguments) != 3 {
-		t.Fatalf("command arguments = %#v, want three arguments", command["arguments"])
-	}
-	if got := arguments[0]; got != uri {
-		t.Fatalf("command uri = %#v, want %q", got, uri)
-	}
-	assertTestPosition(t, arguments[1], 4, 0)
-	locations, ok := arguments[2].([]any)
-	if !ok || len(locations) != 1 {
-		t.Fatalf("locations = %#v, want one location", arguments[2])
-	}
-	location, ok := locations[0].(map[string]any)
-	if !ok || location["uri"] != uri {
-		t.Fatalf("location = %#v, want uri %q", locations[0], uri)
-	}
-	assertTestRange(t, location["range"], 4, 0)
 }
 
 func TestServeWithTraceRecordsRequestAndResponseMethods(t *testing.T) {
@@ -183,7 +184,10 @@ func writeTestFrame(t *testing.T, dst io.Writer, message any) {
 func readTestFrame(t *testing.T, src io.Reader) map[string]any {
 	t.Helper()
 
-	reader := bufio.NewReader(src)
+	reader, ok := src.(*bufio.Reader)
+	if !ok {
+		reader = bufio.NewReader(src)
+	}
 	contentLength := -1
 	for {
 		line, err := reader.ReadString('\n')
