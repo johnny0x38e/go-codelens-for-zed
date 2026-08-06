@@ -118,19 +118,19 @@ git commit -m "feat: add static CodeLens LSP server"
 - Consumes: native executable `bin/go-implementation-lens-ls-aarch64-apple-darwin`.
 - Produces: Zed language server id `go-implementation-lens` attached to language `Go` with language id `go`.
 
-- [ ] **Step 1: Add the extension manifest and Rust crate**
+- [x] **Step 1: Add the extension manifest and Rust crate**
 
-Register `[language_servers.go-implementation-lens]` for `languages = ["Go"]`, use extension schema 1, Rust extension API 0.7.0, and request only process execution capability required to launch the sidecar.
+Register `[language_servers.go-implementation-lens]` for `languages = ["Go"]`, use extension schema 1 and Rust extension API 0.7.0. Zed language-server launch does not require an explicit extension capability in the source manifest.
 
-- [ ] **Step 2: Implement the development command adapter**
+- [x] **Step 2: Implement the development command adapter**
 
 Implement `zed::Extension::language_server_command` and resolve the binary relative to the extension worktree. Return an actionable error containing the build script path when the binary is absent.
 
-- [ ] **Step 3: Add the deterministic development build script**
+- [x] **Step 3: Add the deterministic development build script**
 
 Build `./cmd/go-implementation-lens-ls` with `GOOS=darwin GOARCH=arm64` into `../bin/go-implementation-lens-ls-aarch64-apple-darwin` without downloading dependencies.
 
-- [ ] **Step 4: Verify both artifacts build**
+- [x] **Step 4: Verify both artifacts build**
 
 Run: `./scripts/build-server.sh`
 
