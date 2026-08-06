@@ -29,7 +29,9 @@
 - `server/internal/lsp/server.go`: JSON-RPC framing, request dispatch, and LSP responses.
 - `server/internal/lsp/server_test.go`: black-box protocol tests through the public `Serve` seam.
 - `scripts/build-server.sh`: builds the native sidecar into `bin/` for dev-extension testing.
+- `scripts/install-server.sh`: installs the native sidecar into a directory on Zed's workspace `PATH`.
 - `examples/poc/main.go`: Go document used for manual Zed verification.
+- `go.work`: exposes the server and POC fixture modules to `gopls` as one workspace.
 - `README.md`: dev build, dev-extension install, settings, and POC verification instructions.
 
 ### Task 1: Stdio LSP tracer bullet
@@ -70,14 +72,14 @@ Send `textDocument/codeLens` for `file:///workspace/main.go` and assert exactly 
 
 ```json
 {
-  "range": {"start":{"line":0,"character":0},"end":{"line":0,"character":0}},
+  "range": {"start":{"line":4,"character":0},"end":{"line":4,"character":0}},
   "command": {
     "title": "Go Implementation Lens: POC",
     "command": "editor.action.showReferences",
     "arguments": [
       "file:///workspace/main.go",
-      {"line":0,"character":0},
-      [{"uri":"file:///workspace/main.go","range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}]
+      {"line":4,"character":0},
+      [{"uri":"file:///workspace/main.go","range":{"start":{"line":4,"character":0},"end":{"line":4,"character":0}}}]
     ]
   }
 }
@@ -115,7 +117,7 @@ git commit -m "feat: add static CodeLens LSP server"
 - Create: `scripts/build-server.sh`
 
 **Interfaces:**
-- Consumes: native executable `bin/go-implementation-lens-ls-aarch64-apple-darwin`.
+- Consumes: native executable `go-implementation-lens-ls` available on the Zed worktree's `PATH`.
 - Produces: Zed language server id `go-implementation-lens` attached to language `Go` with language id `go`.
 
 - [x] **Step 1: Add the extension manifest and Rust crate**
@@ -124,11 +126,11 @@ Register `[language_servers.go-implementation-lens]` for `languages = ["Go"]`, u
 
 - [x] **Step 2: Implement the development command adapter**
 
-Implement `zed::Extension::language_server_command` and resolve the binary relative to the extension worktree. Return an actionable error containing the build script path when the binary is absent.
+Implement `zed::Extension::language_server_command` and resolve the binary with `Worktree::which`. Return an actionable error containing the install script path when the binary is absent. This avoids incorrectly assuming that a Zed Wasm extension's current directory is the extension source directory.
 
 - [x] **Step 3: Add the deterministic development build script**
 
-Build `./cmd/go-implementation-lens-ls` with `GOOS=darwin GOARCH=arm64` into `../bin/go-implementation-lens-ls-aarch64-apple-darwin` without downloading dependencies.
+Build `./cmd/go-implementation-lens-ls` with `GOOS=darwin GOARCH=arm64` into `../bin/go-implementation-lens-ls-aarch64-apple-darwin` without downloading dependencies. Install it as `go-implementation-lens-ls` into a directory on Zed's inherited `PATH` for local dev-extension testing.
 
 - [x] **Step 4: Verify both artifacts build**
 
@@ -140,7 +142,7 @@ Run: `cargo check --target wasm32-wasip2`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add extension.toml Cargo.toml src scripts
@@ -157,7 +159,7 @@ git commit -m "feat: register CodeLens sidecar with Zed"
 - Consumes: Zed dev-extension installer and the two artifacts from Tasks 1 and 2.
 - Produces: documented, repeatable evidence that the auxiliary server coexists with gopls and its Lens navigates.
 
-- [ ] **Step 1: Add the manual fixture and setup documentation**
+- [x] **Step 1: Add the manual fixture and setup documentation**
 
 Document these settings:
 
@@ -172,19 +174,19 @@ Document these settings:
 }
 ```
 
-- [ ] **Step 2: Install the directory as a Zed dev extension**
+- [x] **Step 2: Install the directory as a Zed dev extension**
 
 Run `zed: install dev extension`, choose this repository, and open `examples/poc/main.go`.
 
-- [ ] **Step 3: Verify the observable seams**
+- [x] **Step 3: Verify the observable seams**
 
-Confirm the static Lens appears, clicking it navigates to the document location, gopls diagnostics/completion still work, and switching `code_lens` between `on`, `menu`, and `off` behaves as Zed documents.
+Confirm the static Lens appears, clicking it navigates to the document location, `gopls` still starts and loads the checkout, and switching `code_lens` between `on`, `menu`, and `off` behaves as Zed documents.
 
-- [ ] **Step 4: Record exact Zed behavior and logs**
+- [x] **Step 4: Record exact Zed behavior and logs**
 
-Add the verified Zed version, required settings, observed multi-target UI, and any adapter limitation to `README.md`. Do not claim untested platforms.
+Add the verified Zed version, required settings, observed display-mode behavior, and any adapter limitation to `README.md`. Do not claim untested platforms.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add examples README.md

@@ -1,0 +1,8 @@
+{
+  "code_lens": "on",
+  "languages": {
+    "Go": {
+      "language_servers": ["gopls", "go-implementation-lens", "..."]
+    }
+  }
+}

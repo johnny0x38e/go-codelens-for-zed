@@ -90,7 +90,7 @@ func TestServeCodeLens(t *testing.T) {
 	if !ok {
 		t.Fatalf("lens = %#v, want object", lenses[0])
 	}
-	assertTestZeroRange(t, lens["range"])
+	assertTestRange(t, lens["range"], 4, 0)
 	command, ok := lens["command"].(map[string]any)
 	if !ok {
 		t.Fatalf("command = %#v, want object", lens["command"])
@@ -109,7 +109,7 @@ func TestServeCodeLens(t *testing.T) {
 	if got := arguments[0]; got != uri {
 		t.Fatalf("command uri = %#v, want %q", got, uri)
 	}
-	assertTestZeroPosition(t, arguments[1])
+	assertTestPosition(t, arguments[1], 4, 0)
 	locations, ok := arguments[2].([]any)
 	if !ok || len(locations) != 1 {
 		t.Fatalf("locations = %#v, want one location", arguments[2])
@@ -118,26 +118,50 @@ func TestServeCodeLens(t *testing.T) {
 	if !ok || location["uri"] != uri {
 		t.Fatalf("location = %#v, want uri %q", locations[0], uri)
 	}
-	assertTestZeroRange(t, location["range"])
+	assertTestRange(t, location["range"], 4, 0)
 }
 
-func assertTestZeroRange(t *testing.T, value any) {
+func TestServeWithTraceRecordsRequestAndResponseMethods(t *testing.T) {
+	input := new(bytes.Buffer)
+	writeTestFrame(t, input, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+		"params":  map[string]any{},
+	})
+	writeTestFrame(t, input, map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "exit",
+	})
+
+	output := new(bytes.Buffer)
+	trace := new(bytes.Buffer)
+	if err := ServeWithTrace(context.Background(), input, output, trace); err != nil {
+		t.Fatalf("ServeWithTrace() error = %v", err)
+	}
+
+	if got := trace.String(); got != "--> initialize\n<-- initialize\n--> exit\n" {
+		t.Fatalf("trace = %q", got)
+	}
+}
+
+func assertTestRange(t *testing.T, value any, line, character float64) {
 	t.Helper()
 
 	rangeValue, ok := value.(map[string]any)
 	if !ok {
 		t.Fatalf("range = %#v, want object", value)
 	}
-	assertTestZeroPosition(t, rangeValue["start"])
-	assertTestZeroPosition(t, rangeValue["end"])
+	assertTestPosition(t, rangeValue["start"], line, character)
+	assertTestPosition(t, rangeValue["end"], line, character)
 }
 
-func assertTestZeroPosition(t *testing.T, value any) {
+func assertTestPosition(t *testing.T, value any, line, character float64) {
 	t.Helper()
 
 	position, ok := value.(map[string]any)
-	if !ok || position["line"] != float64(0) || position["character"] != float64(0) {
-		t.Fatalf("position = %#v, want line 0 character 0", value)
+	if !ok || position["line"] != line || position["character"] != character {
+		t.Fatalf("position = %#v, want line %v character %v", value, line, character)
 	}
 }
 

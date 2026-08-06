@@ -1,3 +1,4 @@
 /bin/
 /target/
+/extension.wasm
 .DS_Store

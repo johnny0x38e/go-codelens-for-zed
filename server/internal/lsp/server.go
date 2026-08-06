@@ -35,6 +35,12 @@ type responseError struct {
 // Serve handles Language Server Protocol messages until the client sends exit
 // or the input stream reaches EOF.
 func Serve(ctx context.Context, in io.Reader, out io.Writer) error {
+	return ServeWithTrace(ctx, in, out, io.Discard)
+}
+
+// ServeWithTrace is Serve with optional request/response method tracing. The
+// trace stream is diagnostic only: write failures never interrupt LSP traffic.
+func ServeWithTrace(ctx context.Context, in io.Reader, out io.Writer, trace io.Writer) error {
 	reader := bufio.NewReader(in)
 	for {
 		select {
@@ -55,6 +61,7 @@ func Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		if err := json.Unmarshal(body, &message); err != nil {
 			return fmt.Errorf("decode JSON-RPC message: %w", err)
 		}
+		traceMethod(trace, "-->", message.Method)
 		if message.Method == "exit" {
 			return nil
 		}
@@ -119,7 +126,15 @@ func Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		if err := writeFrame(out, reply); err != nil {
 			return err
 		}
+		traceMethod(trace, "<--", message.Method)
 	}
+}
+
+func traceMethod(trace io.Writer, direction, method string) {
+	if trace == nil {
+		return
+	}
+	_, _ = fmt.Fprintf(trace, "%s %s\n", direction, method)
 }
 
 func staticCodeLens(params json.RawMessage) ([]any, error) {
@@ -135,7 +150,7 @@ func staticCodeLens(params json.RawMessage) ([]any, error) {
 		return nil, errors.New("textDocument/codeLens params must include textDocument.uri")
 	}
 
-	position := map[string]any{"line": 0, "character": 0}
+	position := map[string]any{"line": 4, "character": 0}
 	rangeValue := map[string]any{"start": position, "end": position}
 	location := map[string]any{
 		"uri":   input.TextDocument.URI,
