@@ -26,9 +26,11 @@ func run() error {
 	}
 	defer closeTrace()
 
-	if err := lsp.ServeWithTrace(context.Background(), os.Stdin, os.Stdout, trace); err != nil && !errors.Is(err, context.Canceled) {
+	err = lsp.ServeWithTrace(context.Background(), os.Stdin, os.Stdout, trace)
+	if err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
+
 	return nil
 }
 
@@ -42,6 +44,7 @@ func openTrace() (io.Writer, func(), error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("open trace file: %w", err)
 	}
+
 	return file, func() {
 		_ = file.Close() //nolint:errcheck // There is no recovery path for a diagnostic trace close failure.
 	}, nil

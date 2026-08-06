@@ -67,6 +67,7 @@ func URIToPath(rawURI string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("make file URI path absolute: %w", err)
 	}
+
 	return filepath.Clean(path), nil
 }
 
@@ -76,7 +77,10 @@ func PathToURI(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("make path absolute: %w", err)
 	}
-	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Clean(absolute))}).String(), nil
+	return (&url.URL{
+		Scheme: "file",
+		Path:   filepath.ToSlash(filepath.Clean(absolute)),
+	}).String(), nil
 }
 
 // FindModuleRoot finds the closest go.mod above filename without walking above
@@ -157,6 +161,7 @@ func FindAnalysisScope(filename, workspaceRoot string) (AnalysisScope, error) {
 		}
 		patterns = append(patterns, pattern)
 	}
+
 	return AnalysisScope{
 		Root:        root,
 		WorkFile:    workFile,
@@ -204,6 +209,7 @@ func parseWorkModuleRoots(workFile string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse go.work %q: %w", workFile, err)
 	}
+
 	workRoot := filepath.Dir(workFile)
 	seen := make(map[string]struct{}, len(parsed.Use))
 	moduleRoots := make([]string, 0, len(parsed.Use))
@@ -223,6 +229,7 @@ func parseWorkModuleRoots(workFile string) ([]string, error) {
 		seen[absolute] = struct{}{}
 		moduleRoots = append(moduleRoots, absolute)
 	}
+
 	sort.Strings(moduleRoots)
 	return moduleRoots, nil
 }
@@ -234,6 +241,7 @@ func containsPath(paths []string, target string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -289,6 +297,7 @@ func (r *locationResolver) identLocation(fileSet *token.FileSet, ident *ast.Iden
 		file = locationFile{content: content, uri: uri}
 		r.files[filename] = file
 	}
+
 	startPosition, err := positionForTokenPosition(file.content, start)
 	if err != nil {
 		return Location{}, err
@@ -297,6 +306,7 @@ func (r *locationResolver) identLocation(fileSet *token.FileSet, ident *ast.Iden
 	if err != nil {
 		return Location{}, err
 	}
+
 	return Location{
 		URI: file.uri,
 		Range: Range{
@@ -317,6 +327,7 @@ func positionForTokenPosition(content []byte, position token.Position) (Position
 	if lineStart < 0 {
 		return Position{}, fmt.Errorf("token column %d exceeds source offset %d", position.Column, position.Offset)
 	}
+
 	return Position{
 		Line:      position.Line - 1,
 		Character: utf16Length(content[lineStart:position.Offset]),
@@ -328,6 +339,7 @@ func utf16Length(content []byte) int {
 	for asciiLength < len(content) && content[asciiLength] < utf8.RuneSelf {
 		asciiLength++
 	}
+
 	length := asciiLength
 	content = content[asciiLength:]
 	for len(content) > 0 {
@@ -339,5 +351,6 @@ func utf16Length(content []byte) int {
 			length++
 		}
 	}
+
 	return length
 }

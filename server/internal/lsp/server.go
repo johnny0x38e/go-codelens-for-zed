@@ -67,6 +67,7 @@ func Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 func ServeWithTrace(ctx context.Context, in io.Reader, out io.Writer, trace io.Writer) error {
 	reader := bufio.NewReader(in)
 	state := newServerState()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -196,6 +197,7 @@ func (s *serverState) initialize(params json.RawMessage) {
 	for _, folder := range input.WorkspaceFolders {
 		addRoot(folder.URI)
 	}
+
 	addRoot(input.RootURI)
 }
 
@@ -295,6 +297,7 @@ func (s *serverState) semanticCodeLenses(ctx context.Context, params json.RawMes
 			Command: lensCommand,
 		})
 	}
+
 	return result, nil
 }
 
@@ -324,6 +327,7 @@ func (s *serverState) documentPathFor(uri string) (documentPath, error) {
 		s.metadataMu.Unlock()
 		return existing, nil
 	}
+
 	s.documentPaths[uri] = resolved
 	s.metadataMu.Unlock()
 	return resolved, nil
@@ -340,6 +344,7 @@ func (s *serverState) analysisScopeFor(filename string) (analysis.AnalysisScope,
 		directory:     filepath.Dir(filename),
 		workspaceRoot: s.workspaceRootFor(filename),
 	}
+
 	s.metadataMu.RLock()
 	cached, ok := s.analysisScopes[key]
 	s.metadataMu.RUnlock()
@@ -356,6 +361,7 @@ func (s *serverState) analysisScopeFor(filename string) (analysis.AnalysisScope,
 		s.metadataMu.Unlock()
 		return existing.scope, existing.err
 	}
+
 	s.analysisScopes[key] = cachedAnalysisScope{scope: scope, err: err}
 	s.metadataMu.Unlock()
 	return scope, err
@@ -377,6 +383,7 @@ func (s *serverState) handleWatchedFiles(params json.RawMessage) {
 	if slices.ContainsFunc(paths, isModuleMetadataPath) {
 		s.invalidateAnalysisScopes()
 	}
+
 	s.invalidateSnapshotsForPaths(paths)
 }
 
@@ -393,6 +400,7 @@ func watchedFilePaths(params json.RawMessage) ([]string, error) {
 		}
 		paths = append(paths, path)
 	}
+
 	return paths, nil
 }
 
@@ -424,13 +432,16 @@ func (s *serverState) snapshotForScope(ctx context.Context, scope analysis.Analy
 		s.storeSnapshot(scope, revision, snapshot)
 		return snapshot, nil
 	})
+
 	if err != nil {
 		return analysis.Snapshot{}, err
 	}
+
 	snapshot, ok := result.(analysis.Snapshot)
 	if !ok {
 		return analysis.Snapshot{}, fmt.Errorf("analysis flight returned %T, want analysis.Snapshot", result)
 	}
+
 	return snapshot, nil
 }
 
@@ -466,6 +477,7 @@ func (s *serverState) cachedSnapshotForScope(scope analysis.AnalysisScope) (anal
 	if cached.valid && cached.snapshotRevision == cached.revision {
 		return cached.snapshot, cached.revision, true
 	}
+
 	return analysis.Snapshot{}, cached.revision, false
 }
 
@@ -473,10 +485,12 @@ func (s *serverState) storeSnapshot(scope analysis.AnalysisScope, revision uint6
 	cacheKey := scope.CacheKey()
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
+
 	cached, ok := s.snapshots[cacheKey]
 	if !ok || cached.revision != revision || !sameAnalysisScope(cached.scope, scope) {
 		return
 	}
+
 	cached.snapshot = snapshot
 	cached.snapshotRevision = revision
 	cached.valid = true
@@ -491,8 +505,10 @@ func (s *serverState) invalidateSnapshotsForPaths(paths []string) {
 	if len(paths) == 0 {
 		return
 	}
+
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
+
 	for cacheKey, cached := range s.snapshots {
 		containsChangedPath := false
 		for _, path := range paths {
@@ -538,6 +554,7 @@ func analysisScopeContainsPath(scope analysis.AnalysisScope, path string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -556,6 +573,7 @@ func sameAnalysisScope(left, right analysis.AnalysisScope) bool {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -569,6 +587,7 @@ func (s *serverState) workspaceRootFor(filename string) string {
 			best = root
 		}
 	}
+
 	return best
 }
 
@@ -601,6 +620,7 @@ func readFrame(reader *bufio.Reader) ([]byte, error) {
 	if _, err := io.ReadFull(reader, body); err != nil {
 		return nil, fmt.Errorf("read JSON-RPC body: %w", err)
 	}
+
 	return body, nil
 }
 
@@ -615,5 +635,6 @@ func writeFrame(out io.Writer, message any) error {
 	if _, err := out.Write(body); err != nil {
 		return fmt.Errorf("write JSON-RPC body: %w", err)
 	}
+
 	return nil
 }

@@ -30,6 +30,7 @@ func (s *documentStore) Open(uri, text string) (string, bool) {
 	if readErr == nil && bytes.Equal(diskContent, content) {
 		return path, s.remove(path)
 	}
+
 	return path, s.setPath(path, content)
 }
 
@@ -38,6 +39,7 @@ func (s *documentStore) Change(uri, text string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+
 	return path, s.setPath(path, []byte(text))
 }
 
@@ -46,6 +48,7 @@ func (s *documentStore) Save(uri string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+
 	diskContent, readErr := os.ReadFile(path) //nolint:gosec // LSP document URIs intentionally identify local workspace files.
 	return path, s.removeIfSaved(path, diskContent, readErr)
 }
@@ -55,6 +58,7 @@ func (s *documentStore) Close(uri string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+
 	return path, s.remove(path)
 }
 
@@ -64,6 +68,7 @@ func (s *documentStore) remove(path string) bool {
 	if _, ok := s.documents[path]; !ok {
 		return false
 	}
+
 	delete(s.documents, path)
 	return true
 }
@@ -79,6 +84,7 @@ func (s *documentStore) removeIfSaved(path string, diskContent []byte, readErr e
 	if readErr != nil || !bytes.Equal(overlay, diskContent) {
 		return true
 	}
+
 	return false
 }
 
@@ -89,6 +95,7 @@ func (s *documentStore) Overlay(moduleDir string) map[string][]byte {
 func (s *documentStore) OverlayForRoots(roots []string) map[string][]byte {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
 	result := make(map[string][]byte)
 	for path, content := range s.documents {
 		insideScope := false
@@ -103,12 +110,14 @@ func (s *documentStore) OverlayForRoots(roots []string) map[string][]byte {
 		}
 		result[path] = append([]byte(nil), content...)
 	}
+
 	return result
 }
 
 func (s *documentStore) setPath(path string, content []byte) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if existing, ok := s.documents[path]; ok && bytes.Equal(existing, content) {
 		return false
 	}
@@ -125,5 +134,6 @@ func pathWithinRoot(path, root string) bool {
 	if os.IsPathSeparator(root[len(root)-1]) {
 		return true
 	}
+
 	return os.IsPathSeparator(path[len(root)])
 }
