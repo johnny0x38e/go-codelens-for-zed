@@ -8,7 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -60,10 +60,14 @@ func URIToPath(rawURI string) (string, error) {
 	if parsed.Scheme != "file" {
 		return "", fmt.Errorf("unsupported URI scheme %q", parsed.Scheme)
 	}
-	if parsed.Host != "" && parsed.Host != "localhost" {
-		return "", fmt.Errorf("unsupported file URI host %q", parsed.Host)
+	if parsed.Opaque != "" {
+		return "", fmt.Errorf("unsupported opaque file URI %q", rawURI)
 	}
-	path, err := filepath.Abs(filepath.FromSlash(parsed.Path))
+	path, err := fileURLPath(parsed)
+	if err != nil {
+		return "", err
+	}
+	path, err = filepath.Abs(path)
 	if err != nil {
 		return "", fmt.Errorf("make file URI path absolute: %w", err)
 	}
@@ -77,10 +81,7 @@ func PathToURI(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("make path absolute: %w", err)
 	}
-	return (&url.URL{
-		Scheme: "file",
-		Path:   filepath.ToSlash(filepath.Clean(absolute)),
-	}).String(), nil
+	return filePathURL(filepath.Clean(absolute)).String(), nil
 }
 
 // FindModuleRoot finds the closest go.mod above filename without walking above
@@ -230,14 +231,13 @@ func parseWorkModuleRoots(workFile string) ([]string, error) {
 		moduleRoots = append(moduleRoots, absolute)
 	}
 
-	sort.Strings(moduleRoots)
+	slices.Sort(moduleRoots)
 	return moduleRoots, nil
 }
 
 func containsPath(paths []string, target string) bool {
-	target = filepath.Clean(target)
 	for _, path := range paths {
-		if filepath.Clean(path) == target {
+		if samePath(path, target) {
 			return true
 		}
 	}
@@ -254,9 +254,9 @@ func pathWithin(path, parent string) bool {
 // Keeping this cache analysis-scoped avoids repeated disk reads without
 // retaining source content in the long-lived Snapshot.
 type locationResolver struct {
-	overlays map[string][]byte
-	files    map[string]locationFile
-	readFile func(string) ([]byte, error)
+	sourceByPath map[string][]byte
+	files        map[string]locationFile
+	readFile     func(string) ([]byte, error)
 }
 
 type locationFile struct {
@@ -264,27 +264,27 @@ type locationFile struct {
 	uri     string
 }
 
-func newLocationResolver(overlays map[string][]byte) *locationResolver {
+func newLocationResolver(sourceByPath map[string][]byte) *locationResolver {
 	return &locationResolver{
-		overlays: overlays,
-		files:    make(map[string]locationFile),
-		readFile: os.ReadFile,
+		sourceByPath: sourceByPath,
+		files:        make(map[string]locationFile),
+		readFile:     os.ReadFile,
 	}
 }
 
 func (r *locationResolver) identLocation(fileSet *token.FileSet, ident *ast.Ident) (Location, error) {
 	start := fileSet.PositionFor(ident.Pos(), false)
 	end := fileSet.PositionFor(ident.End(), false)
-	filename, err := filepath.Abs(start.Filename)
-	if err != nil {
-		return Location{}, fmt.Errorf("make declaration filename absolute: %w", err)
-	}
-	filename = filepath.Clean(filename)
-
-	file, ok := r.files[filename]
+	file, ok := r.files[start.Filename]
 	if !ok {
-		content, overlaid := r.overlays[filename]
-		if !overlaid {
+		filename, err := filepath.Abs(start.Filename)
+		if err != nil {
+			return Location{}, fmt.Errorf("make declaration filename absolute: %w", err)
+		}
+		filename = filepath.Clean(filename)
+
+		content, available := r.sourceByPath[filename]
+		if !available {
 			content, err = r.readFile(filename)
 		}
 		if err != nil {
@@ -295,7 +295,7 @@ func (r *locationResolver) identLocation(fileSet *token.FileSet, ident *ast.Iden
 			return Location{}, uriErr
 		}
 		file = locationFile{content: content, uri: uri}
-		r.files[filename] = file
+		r.files[start.Filename] = file
 	}
 
 	startPosition, err := positionForTokenPosition(file.content, start)

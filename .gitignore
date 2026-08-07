@@ -1,9 +1,9 @@
 .DS_Store
 .codegraph/
-.zed/
-!.zed/settings.json
 bin/
 target/
 docs/
 extension.wasm
 RESEARCH.md
+/PERFORMANCE.md
+/PERFORMANCE.zh-CN.md

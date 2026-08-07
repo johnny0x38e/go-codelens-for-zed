@@ -1,58 +1,98 @@
 package analysis
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"golang.org/x/tools/go/packages"
 )
 
-type namedTypeDeclaration struct {
-	name          string
-	namedType     *types.Named
-	interfaceType *types.Interface
-	location      Location
-}
-
-type interfaceMethodDeclaration struct {
-	owner    *namedTypeDeclaration
-	function *types.Func
-	location Location
-}
-
-type concreteMethodDeclaration struct {
-	function *types.Func
-	location Location
-}
-
-type referenceDeclaration struct {
-	object   types.Object
-	location Location
-	showZero bool
-}
-
-type methodReferenceDeclaration struct {
-	function         *types.Func
-	interfaceType    *types.Interface
-	concreteReceiver types.Type
-}
-
+// namedRelationship keeps the display name and navigation target together.
+// The name cannot be recovered from Location when a snapshot is materialized,
+// so retaining this small value avoids keeping go/types objects alive.
 type namedRelationship struct {
 	name     string
 	location Location
 }
 
+// referenceLensData is the compact, declaration-oriented input to snapshot
+// construction. It deliberately contains no AST or go/types pointers so the
+// expensive package graph can be released after a non-incremental analysis.
 type referenceLensData struct {
-	showZero bool
-	targets  []Location
+	declaration        symbolID
+	location           Location
+	showZero           bool
+	relationshipLenses declarationLensSet
+	targets            []Location
 }
+
+// declarationLensSet records the non-reference lenses emitted at a declaration.
+// A bitset keeps the common snapshot-building path compact and branch-friendly.
+type declarationLensSet uint8
+
+const (
+	declarationLensInterface declarationLensSet = 1 << iota
+	declarationLensNamedType
+	declarationLensInterfaceMethod
+	declarationLensConcreteMethod
+)
+
+func markDeclarationLens(
+	lenses []referenceLensData,
+	primaryIndexes map[symbolID]int,
+	additionalIndexes map[symbolID][]int,
+	id symbolID,
+	kind declarationLensSet,
+) {
+	primary, exists := primaryIndexes[id]
+	if !exists {
+		return
+	}
+	lenses[primary].relationshipLenses |= kind
+	if additionalIndexes == nil {
+		return
+	}
+	for _, index := range additionalIndexes[id] {
+		lenses[index].relationshipLenses |= kind
+	}
+}
+
+// loadedScope owns the only source copy retained from packages.Load. The source
+// bytes are reused for UTF-16 location conversion instead of rereading files.
+type loadedScope struct {
+	packages     []*packages.Package
+	sourceByPath map[string][]byte
+}
+
+// scopeAnalysis optionally carries the immutable indexes required by Engine.
+// One-shot callers receive only the compact Snapshot.
+type scopeAnalysis struct {
+	snapshot Snapshot
+	index    *scopeIndex
+}
+
+// sourceParser captures the exact bytes parsed by go/packages. ParseFile may be
+// called concurrently, hence the mutex around sourceByPath.
+type sourceParser struct {
+	mu           sync.Mutex
+	sourceByPath map[string][]byte
+}
+
+// implementationIndexThreshold is the crossover between a direct Cartesian
+// scan and building method posting lists. Below this many candidate pairs, the
+// allocation-free direct path is generally cheaper than constructing an index.
+const implementationIndexThreshold = 1024
 
 // AnalyzeModule loads all packages in moduleDir and computes exact named type
 // implementation relationships and declaration references, including tests.
@@ -65,211 +105,688 @@ func AnalyzeModule(ctx context.Context, moduleDir string, overlays map[string][]
 // computes relationships across every included module. Callers must not mutate
 // overlays until AnalyzeScope returns.
 func AnalyzeScope(ctx context.Context, scope AnalysisScope, overlays map[string][]byte) (Snapshot, error) {
+	result, err := analyzeScope(ctx, scope, overlays, false)
+	return result.snapshot, err
+}
+
+func analyzeScope(ctx context.Context, scope AnalysisScope, overlays map[string][]byte, retainIndex bool) (scopeAnalysis, error) {
 	absoluteOverlays, err := canonicalOverlays(overlays)
 	if err != nil {
-		return Snapshot{}, err
+		return scopeAnalysis{}, err
+	}
+	loaded, err := loadScopePackages(ctx, scope, absoluteOverlays)
+	if err != nil {
+		return scopeAnalysis{}, err
 	}
 
-	environment := append([]string(nil), os.Environ()...)
+	packagesToInspect := packagesForAnalysis(loaded.packages)
+	facts, err := extractPackageFacts(packagesToInspect, newLocationResolver(loaded.sourceByPath))
+	if err != nil {
+		return scopeAnalysis{}, err
+	}
+	result := scopeAnalysis{}
+	if retainIndex {
+		// Incremental mode pays the one-time indexing cost so later edits can
+		// copy and recompute only package-owned buckets and relationship rows.
+		result.index, err = buildScopeIndex(scope, packagesToInspect, facts, loaded.sourceByPath)
+		if err != nil {
+			return scopeAnalysis{}, err
+		}
+		result.snapshot = snapshotFromIndexes(result.index.facts, result.index.relationships)
+	} else {
+		// One-shot analysis avoids retaining the type graph and its indexes.
+		result.snapshot = snapshotFromFacts(facts)
+	}
+	return result, nil
+}
+
+func loadScopePackages(ctx context.Context, scope AnalysisScope, overlays map[string][]byte) (loadedScope, error) {
+	environment := os.Environ()
 	if scope.WorkFile != "" {
 		environment = append(environment, "GOWORK="+scope.WorkFile)
 	} else {
 		environment = append(environment, "GOWORK=off")
 	}
 
+	parser := &sourceParser{sourceByPath: make(map[string][]byte)}
 	loaded, err := packages.Load(&packages.Config{
-		Context: ctx,
-		Dir:     scope.Root,
-		Mode:    packages.LoadSyntax,
-		Tests:   true,
-		Overlay: absoluteOverlays,
-		Env:     environment,
+		Context:   ctx,
+		Dir:       scope.Root,
+		Mode:      packages.LoadSyntax | packages.NeedForTest | packages.NeedModule,
+		Tests:     true,
+		Overlay:   overlays,
+		Env:       environment,
+		ParseFile: parser.parseFile,
 	}, scope.Patterns...)
 	if err != nil {
-		return Snapshot{}, fmt.Errorf("load Go analysis scope: %w", err)
+		return loadedScope{}, fmt.Errorf("load Go analysis scope: %w", err)
 	}
-	loaded = packagesForAnalysis(loaded)
 
-	locations := newLocationResolver(absoluteOverlays)
-	declarations, interfaceMethods, concreteMethods, referenceDeclarations, err := collectDeclarations(loaded, locations)
+	return loadedScope{
+		packages:     loaded,
+		sourceByPath: parser.sourceByPath,
+	}, nil
+}
+
+func analyzeLoadedPackages(loaded []*packages.Package, sourceByPath map[string][]byte) (Snapshot, error) {
+	locations := newLocationResolver(sourceByPath)
+	facts, err := extractPackageFacts(loaded, locations)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if len(declarations) == 0 && len(referenceDeclarations) == 0 {
-		return newSnapshot(make(map[string][]Lens)), nil
+	return snapshotFromFacts(facts), nil
+}
+
+func snapshotFromFacts(factsByPackage map[string]*packageFacts) Snapshot {
+	// Count before allocating: a workspace may contain thousands of package
+	// variants, and repeated slice growth here would amplify peak memory.
+	var declarationCount, interfaceCount, interfaceMethodCount, concreteTypeCount, concreteMethodCount int
+	for _, facts := range factsByPackage {
+		declarationCount += len(facts.declarations)
+		interfaceCount += len(facts.interfaces)
+		for _, declaration := range facts.interfaces {
+			interfaceMethodCount += len(declaration.methods)
+		}
+		concreteTypeCount += len(facts.namedTypes)
+		concreteMethodCount += len(facts.declaredMethods)
+	}
+	if declarationCount == 0 {
+		return newSnapshot(make(map[string][]Lens))
 	}
 
-	var (
-		interfaces    []*namedTypeDeclaration
-		concreteTypes []*namedTypeDeclaration
+	referenceIndexes := make(map[symbolID]int, declarationCount)
+	var additionalReferenceIndexes map[symbolID][]int
+	referenceLenses := make([]referenceLensData, 0, declarationCount)
+	for _, facts := range factsByPackage {
+		for _, declaration := range facts.declarations {
+			primary, exists := referenceIndexes[declaration.id]
+			if exists {
+				if referenceLenses[primary].location == declaration.location {
+					referenceLenses[primary].showZero = referenceLenses[primary].showZero ||
+						declaration.showZero
+					continue
+				}
+				duplicate := false
+				if additionalReferenceIndexes != nil {
+					for _, index := range additionalReferenceIndexes[declaration.id] {
+						if referenceLenses[index].location == declaration.location {
+							referenceLenses[index].showZero = referenceLenses[index].showZero ||
+								declaration.showZero
+							duplicate = true
+							break
+						}
+					}
+				}
+				if duplicate {
+					continue
+				}
+				if additionalReferenceIndexes == nil {
+					additionalReferenceIndexes = make(map[symbolID][]int)
+				}
+				additionalReferenceIndexes[declaration.id] = append(
+					additionalReferenceIndexes[declaration.id],
+					len(referenceLenses),
+				)
+			} else {
+				referenceIndexes[declaration.id] = len(referenceLenses)
+			}
+			referenceLenses = append(referenceLenses, referenceLensData{
+				declaration: declaration.id,
+				location:    declaration.location,
+				showZero:    declaration.showZero,
+			})
+		}
+	}
+	for _, facts := range factsByPackage {
+		for _, declaration := range facts.interfaces {
+			markDeclarationLens(
+				referenceLenses,
+				referenceIndexes,
+				additionalReferenceIndexes,
+				declaration.id,
+				declarationLensInterface,
+			)
+			for _, method := range declaration.methods {
+				markDeclarationLens(
+					referenceLenses,
+					referenceIndexes,
+					additionalReferenceIndexes,
+					method.id,
+					declarationLensInterfaceMethod,
+				)
+			}
+		}
+		for _, declaration := range facts.namedTypes {
+			markDeclarationLens(
+				referenceLenses,
+				referenceIndexes,
+				additionalReferenceIndexes,
+				declaration.id,
+				declarationLensNamedType,
+			)
+		}
+		for _, method := range facts.declaredMethods {
+			markDeclarationLens(
+				referenceLenses,
+				referenceIndexes,
+				additionalReferenceIndexes,
+				method.id,
+				declarationLensConcreteMethod,
+			)
+		}
+	}
+	for _, facts := range factsByPackage {
+		for _, use := range facts.directUses {
+			if primary, exists := referenceIndexes[use.id]; exists {
+				referenceLenses[primary].targets = append(referenceLenses[primary].targets, use.location)
+				if additionalReferenceIndexes != nil {
+					for _, index := range additionalReferenceIndexes[use.id] {
+						referenceLenses[index].targets = append(referenceLenses[index].targets, use.location)
+					}
+				}
+			}
+		}
+		for _, use := range facts.methodUses {
+			for _, methodID := range use.matchedMethods {
+				if primary, exists := referenceIndexes[methodID]; exists {
+					referenceLenses[primary].targets = append(referenceLenses[primary].targets, use.location)
+					if additionalReferenceIndexes != nil {
+						for _, index := range additionalReferenceIndexes[methodID] {
+							referenceLenses[index].targets = append(referenceLenses[index].targets, use.location)
+						}
+					}
+				}
+			}
+		}
+	}
+	interfaceTargets := make(map[Location][]Location, interfaceCount)
+	typeInterfaces := make(map[Location][]namedRelationship, concreteTypeCount)
+	collectPackageFactImplementationRelationships(
+		factsByPackage,
+		interfaceCount,
+		concreteTypeCount,
+		interfaceTargets,
+		typeInterfaces,
 	)
-	for _, declaration := range declarations {
-		if declaration.interfaceType != nil {
-			interfaces = append(interfaces, declaration)
-		} else {
-			concreteTypes = append(concreteTypes, declaration)
+	interfaceMethodTargets := make(map[Location][]Location, interfaceMethodCount)
+	concreteMethodInterfaces := make(map[Location][]namedRelationship, concreteMethodCount)
+	concreteMethodsByIdentity := make(map[string][]methodFact, concreteMethodCount)
+	for _, facts := range factsByPackage {
+		for _, method := range facts.declaredMethods {
+			concreteMethodsByIdentity[method.identity] = append(concreteMethodsByIdentity[method.identity], method)
+		}
+	}
+	for _, facts := range factsByPackage {
+		for _, interfaceDeclaration := range facts.interfaces {
+			for _, interfaceMethod := range interfaceDeclaration.methods {
+				for _, concreteMethod := range concreteMethodsByIdentity[interfaceMethod.identity] {
+					if !types.Identical(interfaceMethod.function.Type(), concreteMethod.function.Type()) {
+						continue
+					}
+					interfaceMethodTargets[interfaceMethod.location] = append(
+						interfaceMethodTargets[interfaceMethod.location],
+						concreteMethod.location,
+					)
+					concreteMethodInterfaces[concreteMethod.location] = append(
+						concreteMethodInterfaces[concreteMethod.location],
+						namedRelationship{
+							name:     interfaceDeclaration.name + "." + interfaceMethod.id.name(),
+							location: interfaceMethod.location,
+						},
+					)
+				}
+			}
 		}
 	}
 
-	interfaceTargets := make(map[Location][]Location)
-	typeInterfaces := make(map[Location][]namedRelationship)
+	return snapshotFromLensData(
+		referenceLenses,
+		interfaceTargets,
+		typeInterfaces,
+		interfaceMethodTargets,
+		concreteMethodInterfaces,
+		len(factsByPackage),
+	)
+}
+
+func snapshotFromLensData(
+	referenceLenses []referenceLensData,
+	interfaceTargets map[Location][]Location,
+	typeInterfaces map[Location][]namedRelationship,
+	interfaceMethodTargets map[Location][]Location,
+	concreteMethodInterfaces map[Location][]namedRelationship,
+	documentCapacity int,
+) Snapshot {
+	// Determine exact per-document lens capacities before materializing the
+	// immutable Snapshot. This avoids repeated growth and copying of Lens slices
+	// while preserving the same duplicate-location rules as emission below.
+	lensCounts := make(map[string]int, documentCapacity)
+	for _, data := range referenceLenses {
+		count := 0
+		if len(data.targets) > 0 || data.showZero {
+			count++
+		}
+		if data.relationshipLenses&declarationLensInterface != 0 {
+			count++
+		}
+		if data.relationshipLenses&declarationLensNamedType != 0 &&
+			len(typeInterfaces[data.location]) > 0 {
+			count++
+		}
+		if data.relationshipLenses&declarationLensInterfaceMethod != 0 {
+			count++
+		}
+		if data.relationshipLenses&declarationLensConcreteMethod != 0 &&
+			len(concreteMethodInterfaces[data.location]) > 0 {
+			count++
+		}
+		if count > 0 {
+			lensCounts[data.location.URI] += count
+		}
+	}
+
+	lensesByURI := make(map[string][]Lens, len(lensCounts))
+	keysByURI := make(map[string][]lensKey, len(lensCounts))
+	for uri, count := range lensCounts {
+		lensesByURI[uri] = make([]Lens, 0, count)
+		keysByURI[uri] = make([]lensKey, 0, count)
+	}
+	for _, data := range referenceLenses {
+		targets := uniqueSortedLocations(data.targets)
+		if len(targets) > 0 || data.showZero {
+			lensesByURI[data.location.URI] = append(lensesByURI[data.location.URI], Lens{
+				Range:   data.location.Range,
+				Title:   referenceCountTitle(len(targets)),
+				Targets: targets,
+				Kind:    LensKindReferences,
+			})
+			keysByURI[data.location.URI] = append(keysByURI[data.location.URI], lensKey{
+				declaration: data.declaration,
+				kind:        LensKindReferences,
+			})
+		}
+		if data.relationshipLenses&declarationLensInterface != 0 {
+			implementationTargets := uniqueSortedLocations(interfaceTargets[data.location])
+			lensesByURI[data.location.URI] = append(lensesByURI[data.location.URI], Lens{
+				Range:   data.location.Range,
+				Title:   implementationCountTitle(len(implementationTargets)),
+				Targets: implementationTargets,
+				Kind:    LensKindImplementations,
+			})
+			keysByURI[data.location.URI] = append(keysByURI[data.location.URI], lensKey{
+				declaration: data.declaration,
+				kind:        LensKindImplementations,
+			})
+		}
+		if data.relationshipLenses&declarationLensNamedType != 0 {
+			appendNamedRelationshipLens(
+				lensesByURI,
+				keysByURI,
+				lensKey{declaration: data.declaration, kind: LensKindImplementations},
+				data.location,
+				typeInterfaces[data.location],
+			)
+		}
+		if data.relationshipLenses&declarationLensInterfaceMethod != 0 {
+			implementationTargets := uniqueSortedLocations(interfaceMethodTargets[data.location])
+			lensesByURI[data.location.URI] = append(lensesByURI[data.location.URI], Lens{
+				Range:   data.location.Range,
+				Title:   implementationCountTitle(len(implementationTargets)),
+				Targets: implementationTargets,
+				Kind:    LensKindImplementations,
+			})
+			keysByURI[data.location.URI] = append(keysByURI[data.location.URI], lensKey{
+				declaration: data.declaration,
+				kind:        LensKindImplementations,
+			})
+		}
+		if data.relationshipLenses&declarationLensConcreteMethod != 0 {
+			appendNamedRelationshipLens(
+				lensesByURI,
+				keysByURI,
+				lensKey{declaration: data.declaration, kind: LensKindImplementations},
+				data.location,
+				concreteMethodInterfaces[data.location],
+			)
+		}
+	}
+
+	for uri := range lensesByURI {
+		sort.Sort(keyedLensSorter{lenses: lensesByURI[uri], keys: keysByURI[uri]})
+	}
+	return newKeyedSnapshot(lensesByURI, keysByURI)
+}
+
+type keyedLensSorter struct {
+	lenses []Lens
+	keys   []lensKey
+}
+
+func (s keyedLensSorter) Len() int {
+	return len(s.lenses)
+}
+
+func (s keyedLensSorter) Less(left, right int) bool {
+	return compareLenses(s.lenses[left], s.lenses[right]) < 0
+}
+
+func (s keyedLensSorter) Swap(left, right int) {
+	s.lenses[left], s.lenses[right] = s.lenses[right], s.lenses[left]
+	s.keys[left], s.keys[right] = s.keys[right], s.keys[left]
+}
+
+func compareLenses(left, right Lens) int {
+	if left.Range.Start != right.Range.Start {
+		return comparePositions(left.Range.Start, right.Range.Start)
+	}
+	if left.Kind != right.Kind {
+		return cmp.Compare(left.Kind, right.Kind)
+	}
+	return cmp.Compare(left.Title, right.Title)
+}
+
+func appendNamedRelationshipLens(
+	lensesByURI map[string][]Lens,
+	keysByURI map[string][]lensKey,
+	key lensKey,
+	location Location,
+	relationships []namedRelationship,
+) {
+	lens, ok := namedRelationshipLens(location, relationships)
+	if !ok {
+		return
+	}
+	lensesByURI[location.URI] = append(lensesByURI[location.URI], lens)
+	keysByURI[location.URI] = append(keysByURI[location.URI], key)
+}
+
+func namedRelationshipLens(location Location, relationships []namedRelationship) (Lens, bool) {
+	relationships = uniqueSortedRelationships(relationships)
+	if len(relationships) == 0 {
+		return Lens{}, false
+	}
+	if len(relationships) == 1 {
+		relationship := relationships[0]
+		return Lens{
+			Range:   location.Range,
+			Title:   "Implements: " + relationship.name,
+			Targets: []Location{relationship.location},
+			Kind:    LensKindImplementations,
+		}, true
+	}
+	names := make([]string, 0, len(relationships))
+	targets := make([]Location, 0, len(relationships))
+	for _, relationship := range relationships {
+		names = append(names, relationship.name)
+		targets = append(targets, relationship.location)
+	}
+	return Lens{
+		Range:   location.Range,
+		Title:   "Implements: " + strings.Join(names, ", "),
+		Targets: uniqueSortedLocations(targets),
+		Kind:    LensKindImplementations,
+	}, true
+}
+
+func collectPackageFactImplementationRelationships(
+	factsByPackage map[string]*packageFacts,
+	interfaceCount, concreteTypeCount int,
+	interfaceTargets map[Location][]Location,
+	typeInterfaces map[Location][]namedRelationship,
+) {
+	if interfaceCount == 0 || concreteTypeCount == 0 {
+		return
+	}
+	// Avoid multiplying the counts directly: division preserves the same
+	// threshold decision without an overflow edge case on very large inputs.
+	if interfaceCount <= implementationIndexThreshold/concreteTypeCount {
+		for _, interfaceFacts := range factsByPackage {
+			for _, interfaceDeclaration := range interfaceFacts.interfaces {
+				interfaceDeclaration.interfaceType.Complete()
+				if interfaceDeclaration.interfaceType.NumMethods() == 0 {
+					continue
+				}
+				for _, concreteFacts := range factsByPackage {
+					for _, candidate := range concreteFacts.namedTypes {
+						if !types.Implements(candidate.named, interfaceDeclaration.interfaceType) &&
+							!types.Implements(candidate.pointer, interfaceDeclaration.interfaceType) {
+							continue
+						}
+						interfaceTargets[interfaceDeclaration.location] = append(
+							interfaceTargets[interfaceDeclaration.location],
+							candidate.location,
+						)
+						typeInterfaces[candidate.location] = append(
+							typeInterfaces[candidate.location],
+							namedRelationship{
+								name:     interfaceDeclaration.name,
+								location: interfaceDeclaration.location,
+							},
+						)
+					}
+				}
+			}
+		}
+		return
+	}
+
+	interfaces := make([]*interfaceFact, 0, interfaceCount)
+	concreteTypes := make([]*namedTypeFact, 0, concreteTypeCount)
+	for _, facts := range factsByPackage {
+		for index := range facts.interfaces {
+			interfaces = append(interfaces, &facts.interfaces[index])
+		}
+		for index := range facts.namedTypes {
+			concreteTypes = append(concreteTypes, &facts.namedTypes[index])
+		}
+	}
+	collectPackageFactImplementationRelationshipsIndexed(
+		interfaces,
+		concreteTypes,
+		interfaceTargets,
+		typeInterfaces,
+	)
+}
+
+func collectPackageFactImplementationRelationshipsIndexed(
+	interfaces []*interfaceFact,
+	concreteTypes []*namedTypeFact,
+	interfaceTargets map[Location][]Location,
+	typeInterfaces map[Location][]namedRelationship,
+) {
+	// Build posting lists only for identities that an interface actually
+	// requires; indexing every method in a large workspace wastes memory.
+	requiredMethodIDs := make(map[string]struct{})
+	for _, interfaceDeclaration := range interfaces {
+		interfaceDeclaration.interfaceType.Complete()
+		for method := range interfaceDeclaration.interfaceType.Methods() {
+			requiredMethodIDs[method.Id()] = struct{}{}
+		}
+	}
+	candidateIndexesByMethodID := make(map[string][]int, len(requiredMethodIDs))
+	for candidateIndex, candidate := range concreteTypes {
+		for _, methodIdentity := range candidate.methodIdentities {
+			if _, required := requiredMethodIDs[methodIdentity]; required {
+				candidateIndexesByMethodID[methodIdentity] = append(
+					candidateIndexesByMethodID[methodIdentity],
+					candidateIndex,
+				)
+			}
+		}
+	}
+	for _, interfaceDeclaration := range interfaces {
+		interfaceType := interfaceDeclaration.interfaceType
+		if interfaceType.NumMethods() == 0 {
+			continue
+		}
+		// Every real implementation must contain every required method. The
+		// smallest posting list is therefore a safe candidate superset and
+		// minimizes the number of exact go/types checks below.
+		var candidateIndexes []int
+		for method := range interfaceType.Methods() {
+			indexes := candidateIndexesByMethodID[method.Id()]
+			if len(indexes) == 0 {
+				candidateIndexes = nil
+				break
+			}
+			if candidateIndexes == nil || len(indexes) < len(candidateIndexes) {
+				candidateIndexes = indexes
+			}
+		}
+		for _, candidateIndex := range candidateIndexes {
+			candidate := concreteTypes[candidateIndex]
+			if !types.Implements(candidate.named, interfaceType) &&
+				!types.Implements(candidate.pointer, interfaceType) {
+				continue
+			}
+			interfaceTargets[interfaceDeclaration.location] = append(
+				interfaceTargets[interfaceDeclaration.location],
+				candidate.location,
+			)
+			typeInterfaces[candidate.location] = append(
+				typeInterfaces[candidate.location],
+				namedRelationship{
+					name:     interfaceDeclaration.name,
+					location: interfaceDeclaration.location,
+				},
+			)
+		}
+	}
+}
+
+func collectFactImplementationRelationships(
+	interfaces []interfaceFact,
+	concreteTypes []namedTypeFact,
+	interfaceTargets map[Location][]Location,
+	typeInterfaces map[Location][]namedRelationship,
+) {
+	if len(interfaces) == 0 || len(concreteTypes) == 0 {
+		return
+	}
+	// The direct path avoids index allocations for small scopes. The indexed
+	// path bounds exact type checks for large interface/type cross-products.
+	if len(interfaces) <= implementationIndexThreshold/len(concreteTypes) {
+		collectFactImplementationRelationshipsDirect(
+			interfaces,
+			concreteTypes,
+			interfaceTargets,
+			typeInterfaces,
+		)
+		return
+	}
+	collectFactImplementationRelationshipsIndexed(
+		interfaces,
+		concreteTypes,
+		interfaceTargets,
+		typeInterfaces,
+	)
+}
+
+func collectFactImplementationRelationshipsDirect(
+	interfaces []interfaceFact,
+	concreteTypes []namedTypeFact,
+	interfaceTargets map[Location][]Location,
+	typeInterfaces map[Location][]namedRelationship,
+) {
 	for _, interfaceDeclaration := range interfaces {
 		interfaceDeclaration.interfaceType.Complete()
 		if interfaceDeclaration.interfaceType.NumMethods() == 0 {
 			continue
 		}
-
 		for _, candidate := range concreteTypes {
-			if !types.Implements(candidate.namedType, interfaceDeclaration.interfaceType) &&
-				!types.Implements(types.NewPointer(candidate.namedType), interfaceDeclaration.interfaceType) {
+			if !types.Implements(candidate.named, interfaceDeclaration.interfaceType) &&
+				!types.Implements(candidate.pointer, interfaceDeclaration.interfaceType) {
 				continue
 			}
-
-			interfaceTargets[interfaceDeclaration.location] = append(interfaceTargets[interfaceDeclaration.location], candidate.location)
+			interfaceTargets[interfaceDeclaration.location] = append(
+				interfaceTargets[interfaceDeclaration.location],
+				candidate.location,
+			)
 			typeInterfaces[candidate.location] = append(typeInterfaces[candidate.location], namedRelationship{
 				name:     interfaceDeclaration.name,
 				location: interfaceDeclaration.location,
 			})
 		}
 	}
+}
 
-	lensesByURI := make(map[string][]Lens)
-	referenceTargets, err := collectReferenceTargets(
-		loaded,
-		referenceDeclarations,
-		interfaceMethods,
-		concreteMethods,
-		locations,
-	)
-	if err != nil {
-		return Snapshot{}, err
+func collectFactImplementationRelationshipsIndexed(
+	interfaces []interfaceFact,
+	concreteTypes []namedTypeFact,
+	interfaceTargets map[Location][]Location,
+	typeInterfaces map[Location][]namedRelationship,
+) {
+	// Restrict posting lists to identities that can participate in a match.
+	requiredMethodIDs := make(map[string]struct{})
+	for _, interfaceDeclaration := range interfaces {
+		interfaceDeclaration.interfaceType.Complete()
+		for method := range interfaceDeclaration.interfaceType.Methods() {
+			requiredMethodIDs[method.Id()] = struct{}{}
+		}
 	}
-
-	referenceLenses := make(map[Location]referenceLensData)
-	for _, declaration := range referenceDeclarations {
-		data := referenceLenses[declaration.location]
-		data.showZero = data.showZero || declaration.showZero
-		data.targets = append(data.targets, referenceTargets[declaration.object]...)
-		referenceLenses[declaration.location] = data
+	candidateIndexesByMethodID := make(map[string][]int, len(requiredMethodIDs))
+	for candidateIndex, candidate := range concreteTypes {
+		for _, methodIdentity := range candidate.methodIdentities {
+			if _, required := requiredMethodIDs[methodIdentity]; required {
+				candidateIndexesByMethodID[methodIdentity] = append(
+					candidateIndexesByMethodID[methodIdentity],
+					candidateIndex,
+				)
+			}
+		}
 	}
-
-	for location, data := range referenceLenses {
-		targets := uniqueSortedLocations(data.targets)
-		if len(targets) == 0 && !data.showZero {
+	for _, interfaceDeclaration := range interfaces {
+		interfaceType := interfaceDeclaration.interfaceType
+		if interfaceType.NumMethods() == 0 {
 			continue
 		}
-		lensesByURI[location.URI] = append(lensesByURI[location.URI], Lens{
-			Range:   location.Range,
-			Title:   referenceCountTitle(len(targets)),
-			Targets: targets,
-			Kind:    LensKindReferences,
-		})
-	}
-
-	for _, location := range uniqueDeclarationLocations(interfaces) {
-		targets := uniqueSortedLocations(interfaceTargets[location])
-		lensesByURI[location.URI] = append(lensesByURI[location.URI], Lens{
-			Range:   location.Range,
-			Title:   implementationCountTitle(len(targets)),
-			Targets: targets,
-			Kind:    LensKindImplementations,
-		})
-	}
-
-	for _, location := range uniqueDeclarationLocations(concreteTypes) {
-		relations := uniqueSortedRelationships(typeInterfaces[location])
-		if len(relations) == 0 {
-			continue
+		// Selecting the rarest required method is equivalent to the first step
+		// of an intersection, but avoids allocating an intermediate set. Exact
+		// types.Implements remains the authority for promoted methods and signatures.
+		var candidateIndexes []int
+		for method := range interfaceType.Methods() {
+			indexes := candidateIndexesByMethodID[method.Id()]
+			if len(indexes) == 0 {
+				candidateIndexes = nil
+				break
+			}
+			if candidateIndexes == nil || len(indexes) < len(candidateIndexes) {
+				candidateIndexes = indexes
+			}
 		}
-
-		names := make([]string, 0, len(relations))
-		targets := make([]Location, 0, len(relations))
-		for _, relation := range relations {
-			names = append(names, relation.name)
-			targets = append(targets, relation.location)
-		}
-
-		lensesByURI[location.URI] = append(lensesByURI[location.URI], Lens{
-			Range:   location.Range,
-			Title:   "Implements: " + strings.Join(names, ", "),
-			Targets: uniqueSortedLocations(targets),
-			Kind:    LensKindImplementations,
-		})
-	}
-
-	interfaceMethodTargets := make(map[Location][]Location)
-	concreteMethodInterfaces := make(map[Location][]namedRelationship)
-	concreteMethodsByID := make(map[string][]*concreteMethodDeclaration, len(concreteMethods))
-	for _, concreteMethod := range concreteMethods {
-		id := concreteMethod.function.Id()
-		concreteMethodsByID[id] = append(concreteMethodsByID[id], concreteMethod)
-	}
-
-	for _, interfaceMethod := range interfaceMethods {
-		for _, concreteMethod := range concreteMethodsByID[interfaceMethod.function.Id()] {
-			if !types.Identical(interfaceMethod.function.Type(), concreteMethod.function.Type()) {
+		for _, candidateIndex := range candidateIndexes {
+			candidate := concreteTypes[candidateIndex]
+			if !types.Implements(candidate.named, interfaceType) &&
+				!types.Implements(candidate.pointer, interfaceType) {
 				continue
 			}
-
-			interfaceMethodTargets[interfaceMethod.location] = append(interfaceMethodTargets[interfaceMethod.location], concreteMethod.location)
-			concreteMethodInterfaces[concreteMethod.location] = append(concreteMethodInterfaces[concreteMethod.location], namedRelationship{
-				name:     qualifiedMethodName(interfaceMethod),
-				location: interfaceMethod.location,
+			interfaceTargets[interfaceDeclaration.location] = append(
+				interfaceTargets[interfaceDeclaration.location],
+				candidate.location,
+			)
+			typeInterfaces[candidate.location] = append(typeInterfaces[candidate.location], namedRelationship{
+				name:     interfaceDeclaration.name,
+				location: interfaceDeclaration.location,
 			})
 		}
 	}
+}
 
-	for _, location := range uniqueInterfaceMethodLocations(interfaceMethods) {
-		targets := uniqueSortedLocations(interfaceMethodTargets[location])
-		lensesByURI[location.URI] = append(lensesByURI[location.URI], Lens{
-			Range:   location.Range,
-			Title:   implementationCountTitle(len(targets)),
-			Targets: targets,
-			Kind:    LensKindImplementations,
-		})
+func (p *sourceParser) parseFile(fileSet *token.FileSet, filename string, source []byte) (*ast.File, error) {
+	absolute, err := filepath.Abs(filename)
+	if err != nil {
+		return nil, fmt.Errorf("make parsed filename absolute: %w", err)
 	}
 
-	for _, location := range uniqueConcreteMethodLocations(concreteMethods) {
-		relations := uniqueSortedRelationships(concreteMethodInterfaces[location])
-		if len(relations) == 0 {
-			continue
-		}
+	// packages.Load owns source for the duration of this call and does not
+	// mutate it after parsing. Retaining the slice avoids reading the same file
+	// again solely to translate byte columns to UTF-16 LSP positions.
+	p.mu.Lock()
+	p.sourceByPath[filepath.Clean(absolute)] = source
+	p.mu.Unlock()
 
-		names := make([]string, 0, len(relations))
-		targets := make([]Location, 0, len(relations))
-		for _, relation := range relations {
-			names = append(names, relation.name)
-			targets = append(targets, relation.location)
-		}
-
-		lensesByURI[location.URI] = append(lensesByURI[location.URI], Lens{
-			Range:   location.Range,
-			Title:   "Implements: " + strings.Join(names, ", "),
-			Targets: uniqueSortedLocations(targets),
-			Kind:    LensKindImplementations,
-		})
-	}
-
-	for uri := range lensesByURI {
-		sort.Slice(lensesByURI[uri], func(i, j int) bool {
-			left := lensesByURI[uri][i]
-			right := lensesByURI[uri][j]
-			if left.Range.Start != right.Range.Start {
-				if left.Range.Start.Line != right.Range.Start.Line {
-					return left.Range.Start.Line < right.Range.Start.Line
-				}
-
-				return left.Range.Start.Character < right.Range.Start.Character
-			}
-			if left.Kind != right.Kind {
-				return left.Kind < right.Kind
-			}
-
-			return left.Title < right.Title
-		})
-	}
-
-	return newSnapshot(lensesByURI), nil
+	const mode = parser.AllErrors | parser.ParseComments
+	return parser.ParseFile(fileSet, filename, source, mode)
 }
 
 func canonicalOverlays(overlays map[string][]byte) (map[string][]byte, error) {
@@ -303,40 +820,13 @@ func packagesForAnalysis(loaded []*packages.Package) []*packages.Package {
 	return result
 }
 
-func uniqueDeclarationLocations(declarations []*namedTypeDeclaration) []Location {
-	locations := make([]Location, 0, len(declarations))
-	for _, declaration := range declarations {
-		locations = append(locations, declaration.location)
-	}
-
-	return uniqueSortedLocations(locations)
-}
-
-func uniqueInterfaceMethodLocations(declarations []*interfaceMethodDeclaration) []Location {
-	locations := make([]Location, 0, len(declarations))
-	for _, declaration := range declarations {
-		locations = append(locations, declaration.location)
-	}
-
-	return uniqueSortedLocations(locations)
-}
-
-func uniqueConcreteMethodLocations(declarations []*concreteMethodDeclaration) []Location {
-	locations := make([]Location, 0, len(declarations))
-	for _, declaration := range declarations {
-		locations = append(locations, declaration.location)
-	}
-
-	return uniqueSortedLocations(locations)
-}
-
 func uniqueSortedRelationships(relationships []namedRelationship) []namedRelationship {
-	sort.Slice(relationships, func(i, j int) bool {
-		if relationships[i].name != relationships[j].name {
-			return relationships[i].name < relationships[j].name
+	slices.SortFunc(relationships, func(left, right namedRelationship) int {
+		if left.name != right.name {
+			return cmp.Compare(left.name, right.name)
 		}
 
-		return locationLess(relationships[i].location, relationships[j].location)
+		return compareLocations(left.location, right.location)
 	})
 
 	result := relationships[:0]
@@ -351,365 +841,6 @@ func uniqueSortedRelationships(relationships []namedRelationship) []namedRelatio
 	return result
 }
 
-func collectDeclarations(
-	packagesToInspect []*packages.Package,
-	locations *locationResolver,
-) (
-	[]*namedTypeDeclaration,
-	[]*interfaceMethodDeclaration,
-	[]*concreteMethodDeclaration,
-	[]*referenceDeclaration,
-	error,
-) {
-	var (
-		namedTypes            []*namedTypeDeclaration
-		interfaceMethods      []*interfaceMethodDeclaration
-		concreteMethods       []*concreteMethodDeclaration
-		referenceDeclarations []*referenceDeclaration
-	)
-
-	for _, loadedPackage := range packagesToInspect {
-		if loadedPackage.TypesInfo == nil || loadedPackage.Fset == nil {
-			continue
-		}
-
-		for _, file := range loadedPackage.Syntax {
-			for _, declaration := range file.Decls {
-				switch declaration := declaration.(type) {
-				case *ast.GenDecl:
-					switch declaration.Tok {
-					case token.TYPE:
-						for _, specification := range declaration.Specs {
-							typeSpecification, ok := specification.(*ast.TypeSpec)
-							if !ok {
-								continue
-							}
-							object, ok := loadedPackage.TypesInfo.Defs[typeSpecification.Name].(*types.TypeName)
-							if !ok {
-								continue
-							}
-							location, err := locations.identLocation(loadedPackage.Fset, typeSpecification.Name)
-							if err != nil {
-								return nil, nil, nil, nil, err
-							}
-							_, isInterface := object.Type().Underlying().(*types.Interface)
-							referenceDeclarations = append(referenceDeclarations, &referenceDeclaration{
-								object:   object,
-								location: location,
-								showZero: isInterface,
-							})
-							referenceDeclarations, err = appendFieldListReferenceDeclarations(
-								referenceDeclarations,
-								loadedPackage,
-								typeSpecification.TypeParams,
-								locations,
-								false,
-							)
-							if err != nil {
-								return nil, nil, nil, nil, err
-							}
-							if structSyntax, ok := typeSpecification.Type.(*ast.StructType); ok {
-								referenceDeclarations, err = appendFieldListReferenceDeclarations(
-									referenceDeclarations,
-									loadedPackage,
-									structSyntax.Fields,
-									locations,
-									false,
-								)
-								if err != nil {
-									return nil, nil, nil, nil, err
-								}
-							}
-							if object.IsAlias() {
-								continue
-							}
-							namedType, ok := object.Type().(*types.Named)
-							if !ok {
-								continue
-							}
-							var interfaceType *types.Interface
-							if underlying, ok := namedType.Underlying().(*types.Interface); ok {
-								interfaceType = underlying
-							}
-							namedDeclaration := &namedTypeDeclaration{
-								name:          object.Name(),
-								namedType:     namedType,
-								interfaceType: interfaceType,
-								location:      location,
-							}
-							namedTypes = append(namedTypes, namedDeclaration)
-
-							interfaceSyntax, ok := typeSpecification.Type.(*ast.InterfaceType)
-							if !ok {
-								continue
-							}
-							for _, field := range interfaceSyntax.Methods.List {
-								for _, name := range field.Names {
-									function, ok := loadedPackage.TypesInfo.Defs[name].(*types.Func)
-									if !ok {
-										continue
-									}
-									methodLocation, err := locations.identLocation(loadedPackage.Fset, name)
-									if err != nil {
-										return nil, nil, nil, nil, err
-									}
-									interfaceMethods = append(interfaceMethods, &interfaceMethodDeclaration{
-										owner:    namedDeclaration,
-										function: function,
-										location: methodLocation,
-									})
-									referenceDeclarations = append(referenceDeclarations, &referenceDeclaration{
-										object:   function,
-										location: methodLocation,
-										showZero: true,
-									})
-								}
-							}
-						}
-					case token.CONST, token.VAR:
-						for _, specification := range declaration.Specs {
-							valueSpecification, ok := specification.(*ast.ValueSpec)
-							if !ok {
-								continue
-							}
-							var err error
-							referenceDeclarations, err = appendIdentReferenceDeclarations(
-								referenceDeclarations,
-								loadedPackage,
-								valueSpecification.Names,
-								locations,
-								false,
-							)
-							if err != nil {
-								return nil, nil, nil, nil, err
-							}
-						}
-					}
-				case *ast.FuncDecl:
-					function, ok := loadedPackage.TypesInfo.Defs[declaration.Name].(*types.Func)
-					if !ok {
-						continue
-					}
-					location, err := locations.identLocation(loadedPackage.Fset, declaration.Name)
-					if err != nil {
-						return nil, nil, nil, nil, err
-					}
-					referenceDeclarations = append(referenceDeclarations, &referenceDeclaration{
-						object:   function,
-						location: location,
-						showZero: true,
-					})
-					referenceDeclarations, err = appendFieldListReferenceDeclarations(
-						referenceDeclarations,
-						loadedPackage,
-						declaration.Type.TypeParams,
-						locations,
-						false,
-					)
-					if err != nil {
-						return nil, nil, nil, nil, err
-					}
-					if declaration.Recv == nil {
-						continue
-					}
-					concreteMethods = append(concreteMethods, &concreteMethodDeclaration{
-						function: function,
-						location: location,
-					})
-				}
-			}
-		}
-	}
-
-	return namedTypes, interfaceMethods, concreteMethods, referenceDeclarations, nil
-}
-
-func appendFieldListReferenceDeclarations(
-	declarations []*referenceDeclaration,
-	loadedPackage *packages.Package,
-	fields *ast.FieldList,
-	locations *locationResolver,
-	showZero bool,
-) ([]*referenceDeclaration, error) {
-	if fields == nil {
-		return declarations, nil
-	}
-
-	for _, field := range fields.List {
-		var err error
-		declarations, err = appendIdentReferenceDeclarations(
-			declarations,
-			loadedPackage,
-			field.Names,
-			locations,
-			showZero,
-		)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return declarations, nil
-}
-
-func appendIdentReferenceDeclarations(
-	declarations []*referenceDeclaration,
-	loadedPackage *packages.Package,
-	identifiers []*ast.Ident,
-	locations *locationResolver,
-	showZero bool,
-) ([]*referenceDeclaration, error) {
-	for _, identifier := range identifiers {
-		if identifier.Name == "_" {
-			continue
-		}
-		object := loadedPackage.TypesInfo.Defs[identifier]
-		if object == nil {
-			continue
-		}
-		location, err := locations.identLocation(loadedPackage.Fset, identifier)
-		if err != nil {
-			return nil, err
-		}
-		declarations = append(declarations, &referenceDeclaration{
-			object:   object,
-			location: location,
-			showZero: showZero,
-		})
-	}
-
-	return declarations, nil
-}
-
-func collectReferenceTargets(
-	packagesToInspect []*packages.Package,
-	declarations []*referenceDeclaration,
-	interfaceMethods []*interfaceMethodDeclaration,
-	concreteMethods []*concreteMethodDeclaration,
-	locations *locationResolver,
-) (map[types.Object][]Location, error) {
-	requested := make(map[types.Object]struct{}, len(declarations))
-	for _, declaration := range declarations {
-		requested[declaration.object] = struct{}{}
-	}
-
-	methodDeclarationsByID := collectMethodReferenceDeclarations(
-		requested,
-		interfaceMethods,
-		concreteMethods,
-	)
-
-	targets := make(map[types.Object][]Location, len(declarations))
-
-	for _, loadedPackage := range packagesToInspect {
-		if loadedPackage.TypesInfo == nil || loadedPackage.Fset == nil {
-			continue
-		}
-
-		var selectionsByIdentifier map[*ast.Ident]*types.Selection
-		if len(methodDeclarationsByID) > 0 && len(loadedPackage.TypesInfo.Selections) > 0 {
-			selectionsByIdentifier = make(map[*ast.Ident]*types.Selection, len(loadedPackage.TypesInfo.Selections))
-			for selector, selection := range loadedPackage.TypesInfo.Selections {
-				selectionsByIdentifier[selector.Sel] = selection
-			}
-		}
-		for identifier, object := range loadedPackage.TypesInfo.Uses {
-			_, directlyRequested := requested[object]
-			usedMethod, isMethod := object.(*types.Func)
-			var methodDeclarations []methodReferenceDeclaration
-
-			if isMethod && len(methodDeclarationsByID) > 0 {
-				signature, hasSignature := usedMethod.Type().(*types.Signature)
-				if !hasSignature || signature.Recv() == nil {
-					isMethod = false
-				} else {
-					methodDeclarations = methodDeclarationsByID[usedMethod.Id()]
-				}
-			}
-			if !directlyRequested && len(methodDeclarations) == 0 {
-				continue
-			}
-			location, err := locations.identLocation(loadedPackage.Fset, identifier)
-			if err != nil {
-				return nil, err
-			}
-			if directlyRequested {
-				targets[object] = append(targets[object], location)
-			}
-			if !isMethod {
-				continue
-			}
-			selection := selectionsByIdentifier[identifier]
-			for _, declaration := range methodDeclarations {
-				if declaration.function == usedMethod ||
-					!types.Identical(declaration.function.Type(), usedMethod.Type()) ||
-					!methodReferenceMatchesSelection(declaration, selection) {
-					continue
-				}
-				targets[declaration.function] = append(targets[declaration.function], location)
-			}
-		}
-	}
-
-	return targets, nil
-}
-
-func collectMethodReferenceDeclarations(
-	requested map[types.Object]struct{},
-	interfaceMethods []*interfaceMethodDeclaration,
-	concreteMethods []*concreteMethodDeclaration,
-) map[string][]methodReferenceDeclaration {
-	result := make(map[string][]methodReferenceDeclaration)
-	for _, method := range interfaceMethods {
-		if _, ok := requested[method.function]; !ok {
-			continue
-		}
-
-		method.owner.interfaceType.Complete()
-		result[method.function.Id()] = append(result[method.function.Id()], methodReferenceDeclaration{
-			function:      method.function,
-			interfaceType: method.owner.interfaceType,
-		})
-	}
-
-	for _, method := range concreteMethods {
-		if _, ok := requested[method.function]; !ok {
-			continue
-		}
-		signature, ok := method.function.Type().(*types.Signature)
-		if !ok || signature.Recv() == nil {
-			continue
-		}
-		result[method.function.Id()] = append(result[method.function.Id()], methodReferenceDeclaration{
-			function:         method.function,
-			concreteReceiver: signature.Recv().Type(),
-		})
-	}
-
-	return result
-}
-
-func methodReferenceMatchesSelection(declaration methodReferenceDeclaration, selection *types.Selection) bool {
-	if selection == nil {
-		return false
-	}
-
-	selectedReceiver := selection.Recv()
-	selectedInterface, receiverIsInterface := selectedReceiver.Underlying().(*types.Interface)
-	if receiverIsInterface {
-		selectedInterface.Complete()
-		if declaration.interfaceType != nil {
-			return true
-		}
-		return typeOrPointerImplements(declaration.concreteReceiver, selectedInterface)
-	}
-	if declaration.interfaceType == nil {
-		return false
-	}
-
-	return typeOrPointerImplements(selectedReceiver, declaration.interfaceType)
-}
-
 func typeOrPointerImplements(candidate types.Type, interfaceType *types.Interface) bool {
 	if candidate == nil || interfaceType == nil {
 		return false
@@ -722,10 +853,6 @@ func typeOrPointerImplements(candidate types.Type, interfaceType *types.Interfac
 	}
 
 	return types.Implements(types.NewPointer(candidate), interfaceType)
-}
-
-func qualifiedMethodName(method *interfaceMethodDeclaration) string {
-	return method.owner.name + "." + method.function.Name()
 }
 
 func implementationCountTitle(count int) string {
@@ -749,9 +876,7 @@ func uniqueSortedLocations(locations []Location) []Location {
 		// LSP navigation arguments use an empty JSON array, not null.
 		return []Location{}
 	}
-	sort.Slice(locations, func(i, j int) bool {
-		return locationLess(locations[i], locations[j])
-	})
+	slices.SortFunc(locations, compareLocations)
 
 	result := locations[:0]
 	for _, location := range locations {
@@ -765,19 +890,21 @@ func uniqueSortedLocations(locations []Location) []Location {
 	return result
 }
 
-func locationLess(left, right Location) bool {
+func compareLocations(left, right Location) int {
 	if left.URI != right.URI {
-		return left.URI < right.URI
+		return cmp.Compare(left.URI, right.URI)
 	}
 	if left.Range.Start != right.Range.Start {
-		if left.Range.Start.Line != right.Range.Start.Line {
-			return left.Range.Start.Line < right.Range.Start.Line
-		}
-		return left.Range.Start.Character < right.Range.Start.Character
-	}
-	if left.Range.End.Line != right.Range.End.Line {
-		return left.Range.End.Line < right.Range.End.Line
+		return comparePositions(left.Range.Start, right.Range.Start)
 	}
 
-	return left.Range.End.Character < right.Range.End.Character
+	return comparePositions(left.Range.End, right.Range.End)
+}
+
+func comparePositions(left, right Position) int {
+	if left.Line != right.Line {
+		return cmp.Compare(left.Line, right.Line)
+	}
+
+	return cmp.Compare(left.Character, right.Character)
 }

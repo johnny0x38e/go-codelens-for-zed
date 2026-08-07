@@ -24,7 +24,7 @@ func TestInitializeParamsDecode(t *testing.T) {
 }
 
 func TestDidChangeParamsDecode(t *testing.T) {
-	const raw = `{"textDocument":{"uri":"file:///workspace/main.go","version":7},"contentChanges":[{"text":"package main\n"},{"text":"package main\n\nfunc main() {}\n"}]}`
+	const raw = `{"textDocument":{"uri":"file:///workspace/main.go","version":7},"contentChanges":[{"range":{"start":{"line":0,"character":1},"end":{"line":0,"character":3}},"rangeLength":2,"text":"x"},{"text":"package main\n\nfunc main() {}\n"}]}`
 
 	var params didChangeTextDocumentParams
 	if err := json.Unmarshal([]byte(raw), &params); err != nil {
@@ -33,8 +33,19 @@ func TestDidChangeParamsDecode(t *testing.T) {
 	if params.TextDocument.URI != "file:///workspace/main.go" {
 		t.Fatalf("TextDocument.URI = %q, want file:///workspace/main.go", params.TextDocument.URI)
 	}
+	if params.TextDocument.Version != 7 {
+		t.Fatalf("TextDocument.Version = %d, want 7", params.TextDocument.Version)
+	}
 	if len(params.ContentChanges) != 2 {
 		t.Fatalf("len(ContentChanges) = %d, want 2", len(params.ContentChanges))
+	}
+	first := params.ContentChanges[0]
+	if first.Range == nil || first.Range.Start.Line != 0 || first.Range.Start.Character != 1 ||
+		first.Range.End.Line != 0 || first.Range.End.Character != 3 {
+		t.Fatalf("first content change range = %#v", first.Range)
+	}
+	if first.RangeLength == nil || *first.RangeLength != 2 {
+		t.Fatalf("first content change rangeLength = %#v, want 2", first.RangeLength)
 	}
 	if got := params.ContentChanges[1].Text; got != "package main\n\nfunc main() {}\n" {
 		t.Fatalf("last content change = %q", got)

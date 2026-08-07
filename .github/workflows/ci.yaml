@@ -1,0 +1,165 @@
+name: CI
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+
+permissions:
+    contents: read
+
+jobs:
+    server:
+        name: Server (${{ matrix.target }})
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - runner: macos-15
+                      goos: darwin
+                      goarch: arm64
+                      target: aarch64-apple-darwin
+                      suffix: ""
+                    - runner: macos-15-intel
+                      goos: darwin
+                      goarch: amd64
+                      target: x86_64-apple-darwin
+                      suffix: ""
+                    - runner: ubuntu-24.04-arm
+                      goos: linux
+                      goarch: arm64
+                      target: aarch64-unknown-linux-gnu
+                      suffix: ""
+                    - runner: ubuntu-24.04
+                      goos: linux
+                      goarch: amd64
+                      target: x86_64-unknown-linux-gnu
+                      suffix: ""
+                    - runner: windows-11-arm
+                      goos: windows
+                      goarch: arm64
+                      target: aarch64-pc-windows-msvc
+                      suffix: .exe
+                    - runner: windows-2025
+                      goos: windows
+                      goarch: amd64
+                      target: x86_64-pc-windows-msvc
+                      suffix: .exe
+        runs-on: ${{ matrix.runner }}
+        defaults:
+            run:
+                shell: bash
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-go@v6
+              with:
+                  go-version-file: server/go.mod
+                  cache-dependency-path: server/go.sum
+
+            - name: Verify native runner
+              run: |
+                  test "$(go env GOOS)" = "${{ matrix.goos }}"
+                  test "$(go env GOARCH)" = "${{ matrix.goarch }}"
+
+            - name: Test server
+              working-directory: server
+              env:
+                  GOWORK: "off"
+                  CGO_ENABLED: "0"
+              run: go test -mod=readonly ./...
+
+            - name: Vet server
+              working-directory: server
+              env:
+                  GOWORK: "off"
+                  CGO_ENABLED: "0"
+              run: go vet -mod=readonly ./...
+
+            - name: Build server (macOS and Linux)
+              if: runner.os != 'Windows'
+              run: |
+                  sh ./scripts/build-server.sh \
+                    "${{ matrix.goos }}" \
+                    "${{ matrix.goarch }}" \
+                    "bin/go-codelens-ls-${{ matrix.target }}${{ matrix.suffix }}"
+                  test -f "bin/go-codelens-ls-${{ matrix.target }}${{ matrix.suffix }}"
+
+            - name: Build server (Windows)
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: |
+                  $outputPath = "bin/go-codelens-ls-${{ matrix.target }}${{ matrix.suffix }}"
+                  & ./scripts/build-server.ps1 `
+                    -TargetOS "${{ matrix.goos }}" `
+                    -TargetArch "${{ matrix.goarch }}" `
+                    -OutputPath $outputPath
+                  if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
+                    throw "server binary was not built at $outputPath"
+                  }
+
+    race:
+        name: Server race detector
+        runs-on: ubuntu-24.04
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-go@v6
+              with:
+                  go-version-file: server/go.mod
+                  cache-dependency-path: server/go.sum
+
+            - name: Run race detector
+              working-directory: server
+              env:
+                  GOWORK: "off"
+              run: go test -mod=readonly -race ./...
+
+    lint:
+        name: Server lint
+        runs-on: ubuntu-24.04
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-go@v6
+              with:
+                  go-version-file: server/go.mod
+                  cache-dependency-path: server/go.sum
+
+            - name: Run golangci-lint
+              working-directory: server
+              env:
+                  GOWORK: "off"
+              run: >-
+                  go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+                  run --config ../.golangci.yaml ./...
+
+    extension:
+        name: Zed extension adapter
+        runs-on: ubuntu-24.04
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Validate version metadata
+              run: ./scripts/set-version.sh --check
+
+            - name: Set up Rust
+              run: |
+                  rustup toolchain install stable \
+                    --profile minimal \
+                    --component clippy \
+                    --component rustfmt \
+                    --target wasm32-wasip2
+                  rustup default stable
+
+            - name: Check formatting
+              run: cargo fmt -- --check
+
+            - name: Test adapter
+              run: cargo test --locked
+
+            - name: Lint adapter
+              run: cargo clippy --all-targets --locked -- -D warnings
+
+            - name: Build Wasm adapter
+              run: cargo build --release --locked --target wasm32-wasip2

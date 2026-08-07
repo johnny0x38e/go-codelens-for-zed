@@ -16,7 +16,10 @@ func TestDocumentStoreCleanOpenAndSaveTrackEffectiveChanges(t *testing.T) {
 	uri := semanticTestFileURI(path)
 	store := newDocumentStore()
 
-	gotPath, changed := store.Open(uri, saved)
+	gotPath, changed, err := store.Open(uri, saved, 1)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
 	if gotPath != path || changed {
 		t.Fatalf("clean Open() = (%q, %t), want (%q, false)", gotPath, changed, path)
 	}
@@ -25,7 +28,14 @@ func TestDocumentStoreCleanOpenAndSaveTrackEffectiveChanges(t *testing.T) {
 	}
 
 	changedContent := "package sample\n\nvar Changed = true\n"
-	gotPath, effectiveChange := store.Change(uri, changedContent)
+	gotPath, effectiveChange, err := store.Change(
+		uri,
+		2,
+		[]textDocumentContentChangeEvent{{Text: changedContent}},
+	)
+	if err != nil {
+		t.Fatalf("Change() error = %v", err)
+	}
 	if gotPath != path || !effectiveChange {
 		t.Fatalf("dirty Change() = (%q, %t), want (%q, true)", gotPath, effectiveChange, path)
 	}
@@ -41,7 +51,7 @@ func TestDocumentStoreCleanOpenAndSaveTrackEffectiveChanges(t *testing.T) {
 	}
 }
 
-func TestDocumentStoreSaveMismatchReportsEffectiveChange(t *testing.T) {
+func TestDocumentStoreSaveMismatchKeepsOverlayAndReportsChange(t *testing.T) {
 	moduleDir := t.TempDir()
 	path := filepath.Join(moduleDir, "sample.go")
 	if err := os.WriteFile(path, []byte("package sample\n"), 0o600); err != nil {
@@ -50,7 +60,12 @@ func TestDocumentStoreSaveMismatchReportsEffectiveChange(t *testing.T) {
 	uri := semanticTestFileURI(path)
 	store := newDocumentStore()
 
-	if _, changed := store.Change(uri, "package sample\n\nvar Unsaved = true\n"); !changed {
+	if _, _, err := store.Open(uri, "package sample\n", 1); err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	const changedContent = "package sample\n\nvar Unsaved = true\n"
+	changes := []textDocumentContentChangeEvent{{Text: changedContent}}
+	if _, changed, err := store.Change(uri, 2, changes); err != nil || !changed {
 		t.Fatal("dirty Change() did not report an effective change")
 	}
 	gotPath, changed := store.Save(uri)
@@ -58,8 +73,19 @@ func TestDocumentStoreSaveMismatchReportsEffectiveChange(t *testing.T) {
 		t.Fatalf("mismatched Save() = (%q, %t), want (%q, true)", gotPath, changed, path)
 	}
 
+	overlay := store.Overlay(moduleDir)
+	if got := string(overlay[path]); len(overlay) != 1 || got != changedContent {
+		t.Fatalf("overlay after mismatched save = %#v, want editor buffer %q", overlay, changedContent)
+	}
+
+	if err := os.WriteFile(path, []byte(changedContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath, changed := store.Save(uri); gotPath != path || changed {
+		t.Fatalf("matching Save() = (%q, %t), want (%q, false)", gotPath, changed, path)
+	}
 	if got := len(store.Overlay(moduleDir)); got != 0 {
-		t.Fatalf("overlay length after mismatched save = %d, want 0", got)
+		t.Fatalf("overlay length after matching save = %d, want 0", got)
 	}
 }
 
@@ -71,13 +97,16 @@ func TestDocumentStoreTracksEffectiveOverlayChanges(t *testing.T) {
 	outsideURI := semanticTestFileURI(outsidePath)
 	store := newDocumentStore()
 
-	if _, changed := store.Open(insideURI, "package sample\n"); !changed {
+	if _, changed, err := store.Open(insideURI, "package sample\n", 1); err != nil || !changed {
 		t.Fatal("dirty Open() did not report an effective change")
 	}
-	if _, changed := store.Change(insideURI, "package sample\n"); changed {
+	identical := []textDocumentContentChangeEvent{{Text: "package sample\n"}}
+	if _, changed, err := store.Change(insideURI, 2, identical); err != nil || changed {
 		t.Fatal("identical Change() reported an effective change")
 	}
-	store.Open(outsideURI, "package outside\n")
+	if _, _, err := store.Open(outsideURI, "package outside\n", 1); err != nil {
+		t.Fatalf("Open(outside) error = %v", err)
+	}
 
 	overlay := store.Overlay(moduleDir)
 	if len(overlay) != 1 || string(overlay[insidePath]) != "package sample\n" {
@@ -129,9 +158,15 @@ func TestDocumentStoreReturnsOverlaysAcrossWorkspaceModules(t *testing.T) {
 	outsidePath := filepath.Join(workspaceRoot, "notes.go")
 
 	store := newDocumentStore()
-	store.Open(semanticTestFileURI(firstPath), "package first\n")
-	store.Open(semanticTestFileURI(secondPath), "package second\n")
-	store.Open(semanticTestFileURI(outsidePath), "package notes\n")
+	if _, _, err := store.Open(semanticTestFileURI(firstPath), "package first\n", 1); err != nil {
+		t.Fatalf("Open(first) error = %v", err)
+	}
+	if _, _, err := store.Open(semanticTestFileURI(secondPath), "package second\n", 1); err != nil {
+		t.Fatalf("Open(second) error = %v", err)
+	}
+	if _, _, err := store.Open(semanticTestFileURI(outsidePath), "package notes\n", 1); err != nil {
+		t.Fatalf("Open(outside) error = %v", err)
+	}
 
 	overlay := store.OverlayForRoots([]string{firstModule, secondModule})
 	if len(overlay) != 2 {
@@ -145,5 +180,116 @@ func TestDocumentStoreReturnsOverlaysAcrossWorkspaceModules(t *testing.T) {
 	}
 	if _, ok := overlay[outsidePath]; ok {
 		t.Fatalf("OverlayForRoots() included unrelated workspace file %q", outsidePath)
+	}
+}
+
+func TestDocumentStoreIgnoresStaleVersionsAndRetainsSavedOpenDocument(t *testing.T) {
+	moduleDir := t.TempDir()
+	path := filepath.Join(moduleDir, "sample.go")
+	original := "package sample\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	uri := semanticTestFileURI(path)
+	store := newDocumentStore()
+
+	gotPath, changed, err := store.Open(uri, original, 1)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if gotPath != path || changed {
+		t.Fatalf("Open() = (%q, %t), want (%q, false)", gotPath, changed, path)
+	}
+
+	changes := []textDocumentContentChangeEvent{
+		textBufferRangeChange(0, 14, 0, 14, "\nvar Changed = true"),
+	}
+	gotPath, changed, err = store.Change(uri, 2, changes)
+	if err != nil {
+		t.Fatalf("Change() error = %v", err)
+	}
+	if gotPath != path || !changed {
+		t.Fatalf("Change() = (%q, %t), want (%q, true)", gotPath, changed, path)
+	}
+	wantDirty := "package sample\nvar Changed = true\n"
+	if got := string(store.Overlay(moduleDir)[path]); got != wantDirty {
+		t.Fatalf("dirty overlay = %q, want %q", got, wantDirty)
+	}
+
+	gotPath, changed, err = store.Change(uri, 2, []textDocumentContentChangeEvent{{Text: original}})
+	if err != nil {
+		t.Fatalf("stale Change() error = %v", err)
+	}
+	if gotPath != path || changed {
+		t.Fatalf("stale Change() = (%q, %t), want (%q, false)", gotPath, changed, path)
+	}
+	if got := string(store.Overlay(moduleDir)[path]); got != wantDirty {
+		t.Fatalf("stale change modified overlay to %q", got)
+	}
+
+	if err := os.WriteFile(path, []byte(wantDirty), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gotPath, changed = store.Save(uri)
+	if gotPath != path || changed {
+		t.Fatalf("Save() = (%q, %t), want (%q, false)", gotPath, changed, path)
+	}
+	if got := len(store.Overlay(moduleDir)); got != 0 {
+		t.Fatalf("overlay length after save = %d, want 0", got)
+	}
+	document, ok := store.documents[path]
+	if !ok {
+		t.Fatal("Save() removed the open document")
+	}
+	if got := string(document.buffer.bytes()); got != wantDirty {
+		t.Fatalf("saved open buffer = %q, want %q", got, wantDirty)
+	}
+
+	store.Close(uri)
+	if _, ok := store.documents[path]; ok {
+		t.Fatal("Close() retained the open document")
+	}
+}
+
+func TestDocumentStoreInvalidIncrementalChangePreservesVersionAndContent(t *testing.T) {
+	moduleDir := t.TempDir()
+	path := filepath.Join(moduleDir, "sample.go")
+	original := "package sample\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	uri := semanticTestFileURI(path)
+	store := newDocumentStore()
+	if _, _, err := store.Open(uri, original, 5); err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	valid := []textDocumentContentChangeEvent{
+		textBufferRangeChange(0, 14, 0, 14, " // v6"),
+	}
+	if _, changed, err := store.Change(uri, 6, valid); err != nil || !changed {
+		t.Fatalf("valid Change() = (changed %t, error %v), want (true, nil)", changed, err)
+	}
+	want := "package sample // v6\n"
+
+	invalid := []textDocumentContentChangeEvent{
+		textBufferRangeChange(9, 0, 9, 0, "invalid"),
+	}
+	if _, changed, err := store.Change(uri, 7, invalid); err == nil || changed {
+		t.Fatalf("invalid Change() = (changed %t, error %v), want (false, non-nil)", changed, err)
+	}
+	document := store.documents[path]
+	if document.version != 6 {
+		t.Fatalf("version after invalid change = %d, want 6", document.version)
+	}
+	if got := string(store.Overlay(moduleDir)[path]); got != want {
+		t.Fatalf("overlay after invalid change = %q, want %q", got, want)
+	}
+
+	if _, changed, err := store.Change(uri, 7, []textDocumentContentChangeEvent{{Text: original}}); err != nil || !changed {
+		t.Fatalf("replacement Change() = (changed %t, error %v), want (true, nil)", changed, err)
+	}
+	if document.version != 7 {
+		t.Fatalf("version after replacement = %d, want 7", document.version)
 	}
 }

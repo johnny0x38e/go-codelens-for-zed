@@ -45,7 +45,5 @@ func openTrace() (io.Writer, func(), error) {
 		return nil, nil, fmt.Errorf("open trace file: %w", err)
 	}
 
-	return file, func() {
-		_ = file.Close() //nolint:errcheck // There is no recovery path for a diagnostic trace close failure.
-	}, nil
+	return file, func() { _ = file.Close() }, nil //nolint:errcheck // There is no recovery path for a diagnostic trace close failure.
 }

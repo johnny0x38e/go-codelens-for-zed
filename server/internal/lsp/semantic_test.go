@@ -4,12 +4,17 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/johnny/go-codelens-for-zed/server/internal/analysis"
 )
 
 func TestServeReturnsLensesForRepositoryFixtureWithoutDidOpen(t *testing.T) {
@@ -99,8 +104,9 @@ func Use() string { return contract.Welcome(Person{}) }
 
 	reader := bufio.NewReader(output)
 	_ = readTestFrame(t, reader)
-	contractLenses := semanticTestResponseLenses(t, readTestFrame(t, reader))
-	appLenses := semanticTestResponseLenses(t, readTestFrame(t, reader))
+	responses := readSemanticTestResponsesByID(t, reader, 2)
+	contractLenses := semanticTestResponseLenses(t, responses[2])
+	appLenses := semanticTestResponseLenses(t, responses[3])
 
 	interfaceLens := findSemanticTestLens(t, contractLenses, "1 implementation", 2)
 	assertSemanticTestTargets(t, interfaceLens, appURI, 4, 5)
@@ -295,8 +301,9 @@ func (WrongStore) Get(key string) error { return nil }
 
 	reader := bufio.NewReader(output)
 	_ = readTestFrame(t, reader)
-	contractLenses := semanticTestResponseLenses(t, readTestFrame(t, reader))
-	storeLenses := semanticTestResponseLenses(t, readTestFrame(t, reader))
+	responses := readSemanticTestResponsesByID(t, reader, 2)
+	contractLenses := semanticTestResponseLenses(t, responses[2])
+	storeLenses := semanticTestResponseLenses(t, responses[3])
 
 	storeHeader := findSemanticTestLens(t, contractLenses, "1 implementation", 2)
 	assertSemanticTestTargets(t, storeHeader, storeURI, 2, 5)
@@ -390,8 +397,9 @@ func (Person) UnusedMethod() {}
 
 	reader := bufio.NewReader(output)
 	_ = readTestFrame(t, reader)
-	contractLenses := semanticTestResponseLenses(t, readTestFrame(t, reader))
-	implementationLenses := semanticTestResponseLenses(t, readTestFrame(t, reader))
+	responses := readSemanticTestResponsesByID(t, reader, 2)
+	contractLenses := semanticTestResponseLenses(t, responses[2])
+	implementationLenses := semanticTestResponseLenses(t, responses[3])
 
 	greeterReferences := findSemanticTestLens(t, contractLenses, "3 references", 2)
 	assertSemanticTestTargetStarts(t, greeterReferences,
@@ -452,7 +460,7 @@ func (Person) UnusedMethod() {}
 	_ = findSemanticTestLens(t, implementationLenses, "0 references", 15)
 }
 
-func TestServeInvalidatesSemanticLensesForUnsavedSignatureChange(t *testing.T) {
+func TestServeDoesNotPublishObsoleteLensesAfterUnsavedSignatureChange(t *testing.T) {
 	moduleDir := t.TempDir()
 	savedSource := []byte(`package sample
 
@@ -479,16 +487,42 @@ func (Person) Greet() string { return "hello" }
 	writeSemanticTestFile(t, filename, savedSource)
 
 	documentURI := semanticTestFileURI(filename)
-	input := new(bytes.Buffer)
-	writeTestFrame(t, input, map[string]any{
+	ctx := t.Context()
+	state := newServerStateWithContext(ctx)
+	originalAnalyzeScope := state.analyzeScope
+	analysisStarted := make(chan struct{})
+	var analysisCalls atomic.Int64
+	state.analyzeScope = func(
+		analysisCtx context.Context,
+		scope analysis.AnalysisScope,
+		changes analysis.ChangeSet,
+		overlay map[string][]byte,
+	) (analysis.Snapshot, error) {
+		if analysisCalls.Add(1) == 1 {
+			close(analysisStarted)
+			<-analysisCtx.Done()
+			return analysis.Snapshot{}, analysisCtx.Err()
+		}
+		return originalAnalyzeScope(analysisCtx, scope, changes, overlay)
+	}
+
+	inputReader, inputWriter := io.Pipe()
+	output := new(bytes.Buffer)
+	serveResult := make(chan error, 1)
+	go func() {
+		serveResult <- serveWithState(ctx, inputReader, output, nil, state)
+	}()
+
+	writeTestFrame(t, inputWriter, map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"method":  "initialize",
 		"params":  map[string]any{"rootUri": semanticTestFileURI(moduleDir)},
 	})
-	writeSemanticTestDidOpen(t, input, documentURI, savedSource)
-	writeSemanticTestCodeLensRequest(t, input, 2, documentURI)
-	writeTestFrame(t, input, map[string]any{
+	writeSemanticTestDidOpen(t, inputWriter, documentURI, savedSource)
+	writeSemanticTestCodeLensRequest(t, inputWriter, 2, documentURI)
+	<-analysisStarted
+	writeTestFrame(t, inputWriter, map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "textDocument/didChange",
 		"params": map[string]any{
@@ -498,36 +532,121 @@ func (Person) Greet() string { return "hello" }
 			},
 		},
 	})
-	writeSemanticTestCodeLensRequest(t, input, 3, documentURI)
-	writeTestFrame(t, input, map[string]any{"jsonrpc": "2.0", "method": "exit"})
-
-	output := new(bytes.Buffer)
-	if err := Serve(context.Background(), input, output); err != nil {
-		t.Fatalf("Serve() error = %v", err)
+	writeSemanticTestCodeLensRequest(t, inputWriter, 3, documentURI)
+	writeTestFrame(t, inputWriter, map[string]any{"jsonrpc": "2.0", "method": "exit"})
+	if err := inputWriter.Close(); err != nil {
+		t.Fatalf("close LSP input: %v", err)
+	}
+	if err := <-serveResult; err != nil {
+		t.Fatalf("serveWithState() error = %v", err)
 	}
 
 	reader := bufio.NewReader(output)
 	_ = readTestFrame(t, reader)
-	beforeChange := semanticTestResponseLenses(t, readTestFrame(t, reader))
-	afterChange := semanticTestResponseLenses(t, readTestFrame(t, reader))
-
-	_ = findSemanticTestLens(t, beforeChange, "1 implementation", 2)
-	_ = findSemanticTestLens(t, beforeChange, "Implements: Greeter", 6)
-	_ = findSemanticTestLens(t, beforeChange, "Implements: Greeter.Greet", 8)
-
-	zeroTypeImplementations := findSemanticTestLens(t, afterChange, "0 implementations", 2)
-	assertSemanticTestTargetStarts(t, zeroTypeImplementations)
-	zeroMethodImplementations := findSemanticTestLens(t, afterChange, "0 implementations", 3)
-	assertSemanticTestTargetStarts(t, zeroMethodImplementations)
-	for _, value := range afterChange {
-		lens, ok := value.(map[string]any)
-		if !ok {
-			continue
+	responses := readSemanticTestResponsesByID(t, reader, 2)
+	for _, id := range []int{2, 3} {
+		lenses := semanticTestResponseLenses(t, responses[id])
+		zeroTypeImplementations := findSemanticTestLens(t, lenses, "0 implementations", 2)
+		assertSemanticTestTargetStarts(t, zeroTypeImplementations)
+		zeroMethodImplementations := findSemanticTestLens(t, lenses, "0 implementations", 3)
+		assertSemanticTestTargetStarts(t, zeroMethodImplementations)
+		for _, value := range lenses {
+			lens, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			line := semanticTestStartLine(lens["range"])
+			if (line == 6 || line == 8) && semanticTestIsImplementationLens(lens) {
+				t.Fatalf("response %d published an obsolete implementation CodeLens: %#v", id, lens)
+			}
 		}
-		line := semanticTestStartLine(lens["range"])
-		if (line == 6 || line == 8) && semanticTestIsImplementationLens(lens) {
-			t.Fatalf("stale implementation CodeLens remains after didChange: %#v", lens)
-		}
+	}
+	if got := analysisCalls.Load(); got != 2 {
+		t.Fatalf("analysis calls = %d, want one canceled and one current analysis", got)
+	}
+}
+
+func TestServeIncrementalChangesMatchFinalDiskAnalysis(t *testing.T) {
+	moduleDir := t.TempDir()
+	writeSemanticTestFile(t, filepath.Join(moduleDir, "go.mod"), []byte("module example.com/incremental\n\ngo 1.26\n"))
+	initialSource := []byte(`package sample
+
+// 😀 verifies that the open buffer retains non-BMP UTF-8 text.
+type Runner interface {
+	Run(value string)
+}
+
+type Worker struct{}
+
+func (Worker) Run(value int) {}
+`)
+	finalSource := []byte(`package sample
+
+// 😀 verifies that the open buffer retains non-BMP UTF-8 text.
+type Runner interface {
+	Run(value string)
+}
+
+type Worker struct{}
+
+func (*Worker) Run(value string) {}
+`)
+	filename := filepath.Join(moduleDir, "sample.go")
+	writeSemanticTestFile(t, filename, initialSource)
+	documentURI := semanticTestFileURI(filename)
+
+	incrementalInput := new(bytes.Buffer)
+	writeTestFrame(t, incrementalInput, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+		"params":  map[string]any{"rootUri": semanticTestFileURI(moduleDir)},
+	})
+	writeSemanticTestDidOpen(t, incrementalInput, documentURI, initialSource)
+	writeTestFrame(t, incrementalInput, map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "textDocument/didChange",
+		"params": map[string]any{
+			"textDocument": map[string]any{"uri": documentURI, "version": 2},
+			"contentChanges": []textDocumentContentChangeEvent{
+				textBufferRangeChange(9, 6, 9, 6, "*"),
+				textBufferRangeChange(9, 25, 9, 28, "string"),
+			},
+		},
+	})
+	writeSemanticTestCodeLensRequest(t, incrementalInput, 2, documentURI)
+	writeTestFrame(t, incrementalInput, map[string]any{"jsonrpc": "2.0", "method": "exit"})
+
+	incrementalOutput := new(bytes.Buffer)
+	if err := Serve(context.Background(), incrementalInput, incrementalOutput); err != nil {
+		t.Fatalf("Serve(incremental) error = %v", err)
+	}
+	incrementalReader := bufio.NewReader(incrementalOutput)
+	_ = readTestFrame(t, incrementalReader)
+	incrementalLenses := semanticTestResponseLenses(t, readTestFrame(t, incrementalReader))
+	_ = findSemanticTestLens(t, incrementalLenses, "Implements: Runner", 7)
+	_ = findSemanticTestLens(t, incrementalLenses, "Implements: Runner.Run", 9)
+
+	writeSemanticTestFile(t, filename, finalSource)
+	diskInput := new(bytes.Buffer)
+	writeTestFrame(t, diskInput, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+		"params":  map[string]any{"rootUri": semanticTestFileURI(moduleDir)},
+	})
+	writeSemanticTestCodeLensRequest(t, diskInput, 2, documentURI)
+	writeTestFrame(t, diskInput, map[string]any{"jsonrpc": "2.0", "method": "exit"})
+
+	diskOutput := new(bytes.Buffer)
+	if err := Serve(context.Background(), diskInput, diskOutput); err != nil {
+		t.Fatalf("Serve(disk) error = %v", err)
+	}
+	diskReader := bufio.NewReader(diskOutput)
+	_ = readTestFrame(t, diskReader)
+	diskLenses := semanticTestResponseLenses(t, readTestFrame(t, diskReader))
+	if !reflect.DeepEqual(incrementalLenses, diskLenses) {
+		t.Fatalf("incremental lenses = %#v, want final disk lenses %#v", incrementalLenses, diskLenses)
 	}
 }
 
@@ -542,7 +661,7 @@ func semanticTestFileURI(path string) string {
 	return (&url.URL{Scheme: "file", Path: path}).String()
 }
 
-func writeSemanticTestDidOpen(t *testing.T, input *bytes.Buffer, uri string, source []byte) {
+func writeSemanticTestDidOpen(t *testing.T, input io.Writer, uri string, source []byte) {
 	t.Helper()
 	writeTestFrame(t, input, map[string]any{
 		"jsonrpc": "2.0",
@@ -558,7 +677,7 @@ func writeSemanticTestDidOpen(t *testing.T, input *bytes.Buffer, uri string, sou
 	})
 }
 
-func writeSemanticTestCodeLensRequest(t *testing.T, input *bytes.Buffer, id int, uri string) {
+func writeSemanticTestCodeLensRequest(t *testing.T, input io.Writer, id int, uri string) {
 	t.Helper()
 	writeTestFrame(t, input, map[string]any{
 		"jsonrpc": "2.0",
@@ -577,6 +696,20 @@ func semanticTestResponseLenses(t *testing.T, response map[string]any) []any {
 		t.Fatalf("result = %#v, want CodeLens array", response["result"])
 	}
 	return lenses
+}
+
+func readSemanticTestResponsesByID(t *testing.T, reader io.Reader, count int) map[int]map[string]any {
+	t.Helper()
+	responses := make(map[int]map[string]any, count)
+	for range count {
+		response := readTestFrame(t, reader)
+		id, ok := response["id"].(float64)
+		if !ok {
+			t.Fatalf("response id = %#v, want number", response["id"])
+		}
+		responses[int(id)] = response
+	}
+	return responses
 }
 
 func findSemanticTestLens(t *testing.T, lenses []any, title string, line int) map[string]any {
