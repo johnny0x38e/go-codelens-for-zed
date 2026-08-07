@@ -365,7 +365,7 @@ func TestServeCancelsCodeLensRequest(t *testing.T) {
 	ctx := t.Context()
 	moduleRoot := t.TempDir()
 	filename := filepath.Join(moduleRoot, "sample.go")
-	uri := semanticTestFileURI(filename)
+	uri := semanticTestFileURI(t, filename)
 	state := newServerStateWithContext(ctx)
 	state.findScope = func(_, _ string) (analysis.AnalysisScope, error) {
 		return analysis.ModuleAnalysisScope(moduleRoot), nil
@@ -395,7 +395,7 @@ func TestServeCancelsCodeLensRequest(t *testing.T) {
 		"jsonrpc": "2.0",
 		"id":      1,
 		"method":  "initialize",
-		"params":  map[string]any{"rootUri": semanticTestFileURI(moduleRoot)},
+		"params":  map[string]any{"rootUri": semanticTestFileURI(t, moduleRoot)},
 	})
 	writeTestFrame(t, inputWriter, map[string]any{
 		"jsonrpc": "2.0",

@@ -213,7 +213,7 @@ func TestSnapshotCacheInvalidatesOnlyChangedScope(t *testing.T) {
 
 	params, err := json.Marshal(map[string]any{
 		"textDocument": map[string]any{
-			"uri":     semanticTestFileURI(filepath.Join(firstRoot, "sample.go")),
+			"uri":     semanticTestFileURI(t, filepath.Join(firstRoot, "sample.go")),
 			"version": 1,
 			"text":    "package first\n",
 		},
@@ -257,7 +257,7 @@ func (Worker) Run() {}
 	if err != nil {
 		t.Fatalf("prime snapshot: %v", err)
 	}
-	uri := semanticTestFileURI(filename)
+	uri := semanticTestFileURI(t, filename)
 	if got := len(snapshot.Lenses(uri)); got == 0 {
 		t.Fatal("primed snapshot has no semantic lenses")
 	}
@@ -280,7 +280,7 @@ func TestInvalidIncrementalNotificationPreservesSnapshot(t *testing.T) {
 	filename := filepath.Join(moduleRoot, "sample.go")
 	source := []byte("package sample\n")
 	writeSemanticTestFile(t, filename, source)
-	uri := semanticTestFileURI(filename)
+	uri := semanticTestFileURI(t, filename)
 
 	state := newServerState()
 	state.workspaceRoots = []string{moduleRoot}
@@ -403,10 +403,10 @@ func TestWatchedFileChangesPreserveLifecycleKinds(t *testing.T) {
 	metadataPath := filepath.Join(root, "go.mod")
 	params, err := json.Marshal(didChangeWatchedFilesParams{
 		Changes: []fileEvent{
-			{URI: semanticTestFileURI(createdPath), Type: watchedFileCreated},
-			{URI: semanticTestFileURI(changedPath), Type: watchedFileChanged},
-			{URI: semanticTestFileURI(deletedPath), Type: watchedFileDeleted},
-			{URI: semanticTestFileURI(metadataPath), Type: watchedFileChanged},
+			{URI: semanticTestFileURI(t, createdPath), Type: watchedFileCreated},
+			{URI: semanticTestFileURI(t, changedPath), Type: watchedFileChanged},
+			{URI: semanticTestFileURI(t, deletedPath), Type: watchedFileDeleted},
+			{URI: semanticTestFileURI(t, metadataPath), Type: watchedFileChanged},
 		},
 	})
 	if err != nil {
@@ -481,7 +481,7 @@ func TestCompletedSnapshotFlightReleasesResult(t *testing.T) {
 	}
 	started := make(chan struct{})
 	release := make(chan struct{})
-	uri := semanticTestFileURI(filename)
+	uri := semanticTestFileURI(t, filename)
 	state.analyzeScope = func(_ context.Context, _ analysis.AnalysisScope, _ analysis.ChangeSet, _ map[string][]byte) (analysis.Snapshot, error) {
 		close(started)
 		<-release
@@ -785,7 +785,7 @@ func TestDocumentPathCacheIsReleasedOnClose(t *testing.T) {
 	t.Parallel()
 
 	state := newServerState()
-	uri := semanticTestFileURI(filepath.Join(t.TempDir(), "sample.go"))
+	uri := semanticTestFileURI(t, filepath.Join(t.TempDir(), "sample.go"))
 	if _, err := state.documentPathFor(uri); err != nil {
 		t.Fatal(err)
 	}
@@ -810,7 +810,7 @@ func watchedFilesParams(t *testing.T, paths ...string) json.RawMessage {
 	t.Helper()
 	changes := make([]map[string]any, 0, len(paths))
 	for _, path := range paths {
-		changes = append(changes, map[string]any{"uri": semanticTestFileURI(path), "type": 2})
+		changes = append(changes, map[string]any{"uri": semanticTestFileURI(t, path), "type": 2})
 	}
 	params, err := json.Marshal(map[string]any{"changes": changes})
 	if err != nil {

@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Precise Go references and interface relationships, shown inline as CodeLens entries in Zed.
+Shows Go references and interface implementations as CodeLens entries in Zed.
 
 ## Why this project exists
 
@@ -119,14 +119,14 @@ pwsh -File .\scripts\build-server.ps1 -TargetOS windows -TargetArch arm64
 
 Supported release targets are:
 
-| Operating system | Architecture | Release target triple        |
-| ---------------- | ------------ | ---------------------------- |
-| macOS            | arm64        | `aarch64-apple-darwin`       |
-| macOS            | x86-64       | `x86_64-apple-darwin`        |
-| Linux            | arm64        | `aarch64-unknown-linux-gnu`  |
-| Linux            | x86-64       | `x86_64-unknown-linux-gnu`   |
-| Windows          | arm64        | `aarch64-pc-windows-msvc`    |
-| Windows          | x86-64       | `x86_64-pc-windows-msvc`     |
+| Operating system | Architecture | Release target triple       |
+| ---------------- | ------------ | --------------------------- |
+| macOS            | arm64        | `aarch64-apple-darwin`      |
+| macOS            | x86-64       | `x86_64-apple-darwin`       |
+| Linux            | arm64        | `aarch64-unknown-linux-gnu` |
+| Linux            | x86-64       | `x86_64-unknown-linux-gnu`  |
+| Windows          | arm64        | `aarch64-pc-windows-msvc`   |
+| Windows          | x86-64       | `x86_64-pc-windows-msvc`    |
 
 After installing a local sidecar, run `zed: install dev extension` and select this repository, or run `zed: rebuild dev extension` after subsequent changes. The checked-in `.zed/settings.json` keeps `gopls` and `go-codelens` active together.
 

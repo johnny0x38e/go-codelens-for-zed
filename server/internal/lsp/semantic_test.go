@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -23,14 +22,14 @@ func TestServeReturnsLensesForRepositoryFixtureWithoutDidOpen(t *testing.T) {
 		t.Fatal("runtime.Caller() did not return the test filename")
 	}
 	repositoryRoot := filepath.Clean(filepath.Join(filepath.Dir(testFile), "..", "..", ".."))
-	documentURI := semanticTestFileURI(filepath.Join(repositoryRoot, "examples", "poc", "main.go"))
+	documentURI := semanticTestFileURI(t, filepath.Join(repositoryRoot, "examples", "poc", "main.go"))
 
 	input := new(bytes.Buffer)
 	writeTestFrame(t, input, map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"method":  "initialize",
-		"params":  map[string]any{"rootUri": semanticTestFileURI(repositoryRoot)},
+		"params":  map[string]any{"rootUri": semanticTestFileURI(t, repositoryRoot)},
 	})
 	writeSemanticTestCodeLensRequest(t, input, 2, documentURI)
 	writeTestFrame(t, input, map[string]any{"jsonrpc": "2.0", "method": "exit"})
@@ -84,14 +83,14 @@ func Use() string { return contract.Welcome(Person{}) }
 	writeSemanticTestFile(t, contractFilename, contractSource)
 	writeSemanticTestFile(t, appFilename, appSource)
 
-	contractURI := semanticTestFileURI(contractFilename)
-	appURI := semanticTestFileURI(appFilename)
+	contractURI := semanticTestFileURI(t, contractFilename)
+	appURI := semanticTestFileURI(t, appFilename)
 	input := new(bytes.Buffer)
 	writeTestFrame(t, input, map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"method":  "initialize",
-		"params":  map[string]any{"rootUri": semanticTestFileURI(workspaceRoot)},
+		"params":  map[string]any{"rootUri": semanticTestFileURI(t, workspaceRoot)},
 	})
 	writeSemanticTestCodeLensRequest(t, input, 2, contractURI)
 	writeSemanticTestCodeLensRequest(t, input, 3, appURI)
@@ -136,8 +135,8 @@ func (Broken) Greet(prefix string) string { return prefix }
 	filename := filepath.Join(moduleDir, "sample.go")
 	writeSemanticTestFile(t, filename, source)
 
-	rootURI := semanticTestFileURI(moduleDir)
-	documentURI := semanticTestFileURI(filename)
+	rootURI := semanticTestFileURI(t, moduleDir)
+	documentURI := semanticTestFileURI(t, filename)
 	input := new(bytes.Buffer)
 	writeTestFrame(t, input, map[string]any{
 		"jsonrpc": "2.0",
@@ -217,13 +216,13 @@ type Value struct{}
 	filename := filepath.Join(moduleDir, "sample.go")
 	writeSemanticTestFile(t, filename, source)
 
-	documentURI := semanticTestFileURI(filename)
+	documentURI := semanticTestFileURI(t, filename)
 	input := new(bytes.Buffer)
 	writeTestFrame(t, input, map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"method":  "initialize",
-		"params":  map[string]any{"rootUri": semanticTestFileURI(moduleDir)},
+		"params":  map[string]any{"rootUri": semanticTestFileURI(t, moduleDir)},
 	})
 	writeSemanticTestDidOpen(t, input, documentURI, source)
 	writeSemanticTestCodeLensRequest(t, input, 2, documentURI)
@@ -278,9 +277,9 @@ func (WrongStore) Get(key string) error { return nil }
 	writeSemanticTestFile(t, contractFilename, contractSource)
 	writeSemanticTestFile(t, storeFilename, storeSource)
 
-	rootURI := semanticTestFileURI(moduleDir)
-	contractURI := semanticTestFileURI(contractFilename)
-	storeURI := semanticTestFileURI(storeFilename)
+	rootURI := semanticTestFileURI(t, moduleDir)
+	contractURI := semanticTestFileURI(t, contractFilename)
+	storeURI := semanticTestFileURI(t, storeFilename)
 	input := new(bytes.Buffer)
 	writeTestFrame(t, input, map[string]any{
 		"jsonrpc": "2.0",
@@ -375,14 +374,14 @@ func (Person) UnusedMethod() {}
 	writeSemanticTestFile(t, contractFilename, contractSource)
 	writeSemanticTestFile(t, implementationFilename, implementationSource)
 
-	contractURI := semanticTestFileURI(contractFilename)
-	implementationURI := semanticTestFileURI(implementationFilename)
+	contractURI := semanticTestFileURI(t, contractFilename)
+	implementationURI := semanticTestFileURI(t, implementationFilename)
 	input := new(bytes.Buffer)
 	writeTestFrame(t, input, map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"method":  "initialize",
-		"params":  map[string]any{"rootUri": semanticTestFileURI(moduleDir)},
+		"params":  map[string]any{"rootUri": semanticTestFileURI(t, moduleDir)},
 	})
 	writeSemanticTestDidOpen(t, input, contractURI, contractSource)
 	writeSemanticTestDidOpen(t, input, implementationURI, implementationSource)
@@ -486,7 +485,7 @@ func (Person) Greet() string { return "hello" }
 	filename := filepath.Join(moduleDir, "sample.go")
 	writeSemanticTestFile(t, filename, savedSource)
 
-	documentURI := semanticTestFileURI(filename)
+	documentURI := semanticTestFileURI(t, filename)
 	ctx := t.Context()
 	state := newServerStateWithContext(ctx)
 	originalAnalyzeScope := state.analyzeScope
@@ -517,7 +516,7 @@ func (Person) Greet() string { return "hello" }
 		"jsonrpc": "2.0",
 		"id":      1,
 		"method":  "initialize",
-		"params":  map[string]any{"rootUri": semanticTestFileURI(moduleDir)},
+		"params":  map[string]any{"rootUri": semanticTestFileURI(t, moduleDir)},
 	})
 	writeSemanticTestDidOpen(t, inputWriter, documentURI, savedSource)
 	writeSemanticTestCodeLensRequest(t, inputWriter, 2, documentURI)
@@ -593,14 +592,14 @@ func (*Worker) Run(value string) {}
 `)
 	filename := filepath.Join(moduleDir, "sample.go")
 	writeSemanticTestFile(t, filename, initialSource)
-	documentURI := semanticTestFileURI(filename)
+	documentURI := semanticTestFileURI(t, filename)
 
 	incrementalInput := new(bytes.Buffer)
 	writeTestFrame(t, incrementalInput, map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"method":  "initialize",
-		"params":  map[string]any{"rootUri": semanticTestFileURI(moduleDir)},
+		"params":  map[string]any{"rootUri": semanticTestFileURI(t, moduleDir)},
 	})
 	writeSemanticTestDidOpen(t, incrementalInput, documentURI, initialSource)
 	writeTestFrame(t, incrementalInput, map[string]any{
@@ -633,7 +632,7 @@ func (*Worker) Run(value string) {}
 		"jsonrpc": "2.0",
 		"id":      1,
 		"method":  "initialize",
-		"params":  map[string]any{"rootUri": semanticTestFileURI(moduleDir)},
+		"params":  map[string]any{"rootUri": semanticTestFileURI(t, moduleDir)},
 	})
 	writeSemanticTestCodeLensRequest(t, diskInput, 2, documentURI)
 	writeTestFrame(t, diskInput, map[string]any{"jsonrpc": "2.0", "method": "exit"})
@@ -657,8 +656,13 @@ func writeSemanticTestFile(t *testing.T, path string, content []byte) {
 	}
 }
 
-func semanticTestFileURI(path string) string {
-	return (&url.URL{Scheme: "file", Path: path}).String()
+func semanticTestFileURI(tb testing.TB, path string) string {
+	tb.Helper()
+	uri, err := analysis.PathToURI(path)
+	if err != nil {
+		tb.Fatalf("analysis.PathToURI(%q) error = %v", path, err)
+	}
+	return uri
 }
 
 func writeSemanticTestDidOpen(t *testing.T, input io.Writer, uri string, source []byte) {

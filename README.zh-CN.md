@@ -119,14 +119,14 @@ pwsh -File .\scripts\build-server.ps1 -TargetOS windows -TargetArch arm64
 
 支持的发布目标如下：
 
-| 操作系统 | 架构   | 发布目标三元组               |
-| -------- | ------ | ---------------------------- |
-| macOS    | arm64  | `aarch64-apple-darwin`       |
-| macOS    | x86-64 | `x86_64-apple-darwin`        |
-| Linux    | arm64  | `aarch64-unknown-linux-gnu`  |
-| Linux    | x86-64 | `x86_64-unknown-linux-gnu`   |
-| Windows  | arm64  | `aarch64-pc-windows-msvc`    |
-| Windows  | x86-64 | `x86_64-pc-windows-msvc`     |
+| 操作系统 | 架构   | 发布目标三元组              |
+| -------- | ------ | --------------------------- |
+| macOS    | arm64  | `aarch64-apple-darwin`      |
+| macOS    | x86-64 | `x86_64-apple-darwin`       |
+| Linux    | arm64  | `aarch64-unknown-linux-gnu` |
+| Linux    | x86-64 | `x86_64-unknown-linux-gnu`  |
+| Windows  | arm64  | `aarch64-pc-windows-msvc`   |
+| Windows  | x86-64 | `x86_64-pc-windows-msvc`    |
 
 安装本地 Sidecar 后，在 Zed 中运行 `zed: install dev extension` 并选择本仓库；后续更新可运行 `zed: rebuild dev extension`。仓库中的 `.zed/settings.json` 会让 `gopls` 与 `go-codelens` 同时保持活动。
 

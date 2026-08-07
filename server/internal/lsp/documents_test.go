@@ -13,7 +13,7 @@ func TestDocumentStoreCleanOpenAndSaveTrackEffectiveChanges(t *testing.T) {
 	if err := os.WriteFile(path, []byte(saved), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	uri := semanticTestFileURI(path)
+	uri := semanticTestFileURI(t, path)
 	store := newDocumentStore()
 
 	gotPath, changed, err := store.Open(uri, saved, 1)
@@ -57,7 +57,7 @@ func TestDocumentStoreSaveMismatchKeepsOverlayAndReportsChange(t *testing.T) {
 	if err := os.WriteFile(path, []byte("package sample\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	uri := semanticTestFileURI(path)
+	uri := semanticTestFileURI(t, path)
 	store := newDocumentStore()
 
 	if _, _, err := store.Open(uri, "package sample\n", 1); err != nil {
@@ -93,8 +93,8 @@ func TestDocumentStoreTracksEffectiveOverlayChanges(t *testing.T) {
 	moduleDir := t.TempDir()
 	insidePath := filepath.Join(moduleDir, "sample.go")
 	outsidePath := filepath.Join(t.TempDir(), "outside.go")
-	insideURI := semanticTestFileURI(insidePath)
-	outsideURI := semanticTestFileURI(outsidePath)
+	insideURI := semanticTestFileURI(t, insidePath)
+	outsideURI := semanticTestFileURI(t, outsidePath)
 	store := newDocumentStore()
 
 	if _, changed, err := store.Open(insideURI, "package sample\n", 1); err != nil || !changed {
@@ -158,13 +158,13 @@ func TestDocumentStoreReturnsOverlaysAcrossWorkspaceModules(t *testing.T) {
 	outsidePath := filepath.Join(workspaceRoot, "notes.go")
 
 	store := newDocumentStore()
-	if _, _, err := store.Open(semanticTestFileURI(firstPath), "package first\n", 1); err != nil {
+	if _, _, err := store.Open(semanticTestFileURI(t, firstPath), "package first\n", 1); err != nil {
 		t.Fatalf("Open(first) error = %v", err)
 	}
-	if _, _, err := store.Open(semanticTestFileURI(secondPath), "package second\n", 1); err != nil {
+	if _, _, err := store.Open(semanticTestFileURI(t, secondPath), "package second\n", 1); err != nil {
 		t.Fatalf("Open(second) error = %v", err)
 	}
-	if _, _, err := store.Open(semanticTestFileURI(outsidePath), "package notes\n", 1); err != nil {
+	if _, _, err := store.Open(semanticTestFileURI(t, outsidePath), "package notes\n", 1); err != nil {
 		t.Fatalf("Open(outside) error = %v", err)
 	}
 
@@ -190,7 +190,7 @@ func TestDocumentStoreIgnoresStaleVersionsAndRetainsSavedOpenDocument(t *testing
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	uri := semanticTestFileURI(path)
+	uri := semanticTestFileURI(t, path)
 	store := newDocumentStore()
 
 	gotPath, changed, err := store.Open(uri, original, 1)
@@ -258,7 +258,7 @@ func TestDocumentStoreInvalidIncrementalChangePreservesVersionAndContent(t *test
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	uri := semanticTestFileURI(path)
+	uri := semanticTestFileURI(t, path)
 	store := newDocumentStore()
 	if _, _, err := store.Open(uri, original, 5); err != nil {
 		t.Fatalf("Open() error = %v", err)

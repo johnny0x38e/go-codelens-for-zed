@@ -121,7 +121,7 @@ func BenchmarkSemanticCodeLensesCacheHit(b *testing.B) {
 	filename := filepath.Join(moduleRoot, "bench.go")
 	writeBenchmarkFile(b, filename, []byte("package bench\n\ntype Runner interface { Run() }\ntype Worker struct{}\nfunc (Worker) Run() {}\nfunc Use(r Runner) { r.Run() }\n"))
 	params, err := json.Marshal(map[string]any{
-		"textDocument": map[string]any{"uri": semanticTestFileURI(filename)},
+		"textDocument": map[string]any{"uri": semanticTestFileURI(b, filename)},
 	})
 	if err != nil {
 		b.Fatal(err)
@@ -143,7 +143,7 @@ func BenchmarkSemanticCodeLensesCacheHit(b *testing.B) {
 
 func BenchmarkDocumentFullTextChange256KiB(b *testing.B) {
 	path := filepath.Join(b.TempDir(), "large.go")
-	uri := semanticTestFileURI(path)
+	uri := semanticTestFileURI(b, path)
 	textA, _, _, _ := benchmarkTextDocument256KiB()
 	textB := textA[:len(textA)-1] + "y"
 	store := newDocumentStore()
@@ -172,7 +172,7 @@ func BenchmarkDocumentFullTextChange256KiB(b *testing.B) {
 
 func BenchmarkDocumentIncrementalChange256KiB(b *testing.B) {
 	path := filepath.Join(b.TempDir(), "large.go")
-	uri := semanticTestFileURI(path)
+	uri := semanticTestFileURI(b, path)
 	content, targetLine, _, _ := benchmarkTextDocument256KiB()
 	store := newDocumentStore()
 	if _, _, err := store.Open(uri, content, 1); err != nil {
@@ -270,7 +270,7 @@ func BenchmarkEditToCodeLensIncremental64Packages(b *testing.B) {
 	if err != nil {
 		b.Fatalf("read entry file: %v", err)
 	}
-	uri := semanticTestFileURI(fixture.EntryFile)
+	uri := semanticTestFileURI(b, fixture.EntryFile)
 	codeLensParams := mustMarshalBenchmarkJSON(b, textDocumentParams{
 		TextDocument: textDocumentIdentifier{URI: uri},
 	})
