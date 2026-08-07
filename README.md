@@ -12,7 +12,7 @@ Go interfaces are implemented implicitly. That makes the language flexible, but 
 
 The project was inspired by [Go Implementation Lens for Visual Studio Code](https://github.com/anirudhagarwal365/go-implementation-lens), created by [Anirudh Agarwal](https://github.com/anirudhagarwal365). Its workflow and presentation proved how useful this information can be. This repository is an independent implementation for Zed, built around Go's type system and further engineered for exact results, incremental analysis, low allocation overhead, and minimal disk I/O.
 
-## Screenshots
+## Screenshot
 
 <img src="assets/screenshot.png" alt="CodeLens">
 
