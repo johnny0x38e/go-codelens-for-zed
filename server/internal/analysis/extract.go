@@ -2,7 +2,6 @@ package analysis
 
 import (
 	"go/ast"
-	"go/token"
 	"go/types"
 	"slices"
 
@@ -49,7 +48,10 @@ type packageFactCapacities struct {
 // extractPackageFacts converts one coherent go/packages load into compact
 // semantic facts. All syntax, file-set, types.Info, source, and object-index
 // references remain extraction-local and are released when this function returns.
-func extractPackageFacts(packagesToInspect []*packages.Package, locations *locationResolver) (map[string]*packageFacts, error) {
+func extractPackageFacts(
+	packagesToInspect []*packages.Package,
+	locations *locationResolver,
+) (map[string]*packageFacts, error) {
 	return extractPackageFactsWithRetained(packagesToInspect, locations, nil)
 }
 
@@ -149,28 +151,22 @@ func (e *factExtraction) extractDeclarations(loadedPackage *packages.Package) er
 	return nil
 }
 
-func (e *factExtraction) extractGeneralDeclaration(facts *packageFacts, loadedPackage *packages.Package, declaration *ast.GenDecl) error {
-	switch declaration.Tok {
-	case token.TYPE:
-		for _, specification := range declaration.Specs {
-			typeSpecification, ok := specification.(*ast.TypeSpec)
-			if !ok {
-				continue
-			}
-			if err := e.extractTypeDeclaration(facts, loadedPackage, typeSpecification); err != nil {
+func (e *factExtraction) extractGeneralDeclaration(
+	facts *packageFacts,
+	loadedPackage *packages.Package,
+	declaration *ast.GenDecl,
+) error {
+	for _, specification := range declaration.Specs {
+		switch specification := specification.(type) {
+		case *ast.TypeSpec:
+			if err := e.extractTypeDeclaration(facts, loadedPackage, specification); err != nil {
 				return err
 			}
-		}
-	case token.CONST, token.VAR:
-		for _, specification := range declaration.Specs {
-			valueSpecification, ok := specification.(*ast.ValueSpec)
-			if !ok {
-				continue
-			}
+		case *ast.ValueSpec:
 			if err := e.appendIdentifierDeclarations(
 				facts,
 				loadedPackage,
-				valueSpecification.Names,
+				specification.Names,
 				"",
 				false,
 			); err != nil {
@@ -178,11 +174,14 @@ func (e *factExtraction) extractGeneralDeclaration(facts *packageFacts, loadedPa
 			}
 		}
 	}
-
 	return nil
 }
 
-func (e *factExtraction) extractTypeDeclaration(facts *packageFacts, loadedPackage *packages.Package, specification *ast.TypeSpec) error {
+func (e *factExtraction) extractTypeDeclaration(
+	facts *packageFacts,
+	loadedPackage *packages.Package,
+	specification *ast.TypeSpec,
+) error {
 	object, ok := loadedPackage.TypesInfo.Defs[specification.Name].(*types.TypeName)
 	if !ok {
 		return nil
@@ -203,7 +202,7 @@ func (e *factExtraction) extractTypeDeclaration(facts *packageFacts, loadedPacka
 	); err != nil {
 		return err
 	}
-	if structure, ok := specification.Type.(*ast.StructType); ok {
+	if structure, isStruct := specification.Type.(*ast.StructType); isStruct {
 		if err := e.appendFieldListDeclarations(
 			facts,
 			loadedPackage,
@@ -277,7 +276,11 @@ func (e *factExtraction) extractTypeDeclaration(facts *packageFacts, loadedPacka
 	return nil
 }
 
-func (e *factExtraction) extractFunctionDeclaration(facts *packageFacts, loadedPackage *packages.Package, declaration *ast.FuncDecl) error {
+func (e *factExtraction) extractFunctionDeclaration(
+	facts *packageFacts,
+	loadedPackage *packages.Package,
+	declaration *ast.FuncDecl,
+) error {
 	function, ok := loadedPackage.TypesInfo.Defs[declaration.Name].(*types.Func)
 	if !ok {
 		return nil
@@ -454,10 +457,7 @@ func (e *factExtraction) extractUses(loadedPackage *packages.Package) error {
 				methodIdentity: usedMethod.Id(),
 				location:       location,
 			}
-			use.receiverID, use.receiverKind, use.unstableReceiver = selectedReceiverDescriptor(
-				selection,
-				false,
-			)
+			use.receiverID, use.receiverKind, use.unstableReceiver = selectedReceiverDescriptor(selection)
 			facts.relationshipSensitive = facts.relationshipSensitive || use.unstableReceiver
 			for _, declaration := range methodDeclarations {
 				if declaration.function == usedMethod ||
@@ -518,7 +518,6 @@ func selectedFieldDeclarationID(selection *types.Selection) (symbolID, bool) {
 				typeOwner(named.Obj().Name()),
 				field.Name(),
 				symbolField,
-				0,
 			), true
 		}
 		current = types.Unalias(structure.Field(fieldIndex).Type())
@@ -560,23 +559,18 @@ func countPackageFacts(loadedPackage *packages.Package) packageFactCapacities {
 		for _, declaration := range file.Decls {
 			switch declaration := declaration.(type) {
 			case *ast.GenDecl:
-				switch declaration.Tok {
-				case token.TYPE:
-					for _, specification := range declaration.Specs {
-						typeSpecification, ok := specification.(*ast.TypeSpec)
-						if !ok {
-							continue
-						}
+				for _, specification := range declaration.Specs {
+					switch specification := specification.(type) {
+					case *ast.TypeSpec:
 						capacities.declarations++
-						capacities.declarations += fieldListIdentifierCount(typeSpecification.TypeParams)
-						if structure, ok := typeSpecification.Type.(*ast.StructType); ok {
+						capacities.declarations += fieldListIdentifierCount(specification.TypeParams)
+						if structure, ok := specification.Type.(*ast.StructType); ok {
 							capacities.declarations += fieldListIdentifierCount(structure.Fields)
 						}
-						if interfaceSyntax, ok := typeSpecification.Type.(*ast.InterfaceType); ok {
+						if interfaceSyntax, ok := specification.Type.(*ast.InterfaceType); ok {
 							capacities.declarations += fieldListIdentifierCount(interfaceSyntax.Methods)
 						}
-
-						object, ok := loadedPackage.TypesInfo.Defs[typeSpecification.Name].(*types.TypeName)
+						object, ok := loadedPackage.TypesInfo.Defs[specification.Name].(*types.TypeName)
 						if !ok || object.IsAlias() {
 							continue
 						}
@@ -585,12 +579,8 @@ func countPackageFacts(loadedPackage *packages.Package) packageFactCapacities {
 						} else if _, named := object.Type().(*types.Named); named {
 							capacities.namedTypes++
 						}
-					}
-				case token.CONST, token.VAR:
-					for _, specification := range declaration.Specs {
-						if valueSpecification, ok := specification.(*ast.ValueSpec); ok {
-							capacities.declarations += identifierCount(valueSpecification.Names)
-						}
+					case *ast.ValueSpec:
+						capacities.declarations += identifierCount(specification.Names)
 					}
 				}
 			case *ast.FuncDecl:
@@ -637,7 +627,7 @@ func symbolIDForObject(object types.Object, packagePath, owner string) symbolID 
 	if object.Pkg() != nil {
 		packagePath = object.Pkg().Path()
 	}
-	return newSymbolID(packagePath, owner, object.Name(), kind, 0)
+	return newSymbolID(packagePath, owner, object.Name(), kind)
 }
 
 func symbolKindForObject(object types.Object, owner string) symbolKind {
@@ -696,7 +686,6 @@ func methodSymbolID(function *types.Func) (symbolID, bool) {
 		typeOwner(receiver),
 		function.Name(),
 		symbolMethod,
-		0,
 	), true
 }
 
@@ -778,7 +767,7 @@ func receiverNamedType(receiver types.Type) *types.Named {
 	return named
 }
 
-func selectedReceiverDescriptor(selection *types.Selection, alreadySensitive bool) (symbolID, receiverKind, bool) {
+func selectedReceiverDescriptor(selection *types.Selection) (symbolID, receiverKind, bool) {
 	if selection == nil {
 		return "", receiverInvalid, true
 	}
@@ -795,9 +784,8 @@ func selectedReceiverDescriptor(selection *types.Selection, alreadySensitive boo
 		}
 		return "", kind, true
 	}
-	if typeArguments := named.TypeArgs(); typeArguments != nil && typeArguments.Len() > 0 {
-		alreadySensitive = true
-	}
+	typeArguments := named.TypeArgs()
+	unstable := typeArguments != nil && typeArguments.Len() > 0
 	if _, isInterface := named.Underlying().(*types.Interface); isInterface {
 		kind = receiverInterface
 	}
@@ -806,16 +794,14 @@ func selectedReceiverDescriptor(selection *types.Selection, alreadySensitive boo
 		"",
 		named.Obj().Name(),
 		symbolType,
-		0,
-	), kind, alreadySensitive
+	), kind, unstable
 }
 
 func methodReferenceFactMatchesSelection(declaration methodReferenceFact, selection *types.Selection) bool {
-	if selection == nil {
-		return false
-	}
+	return selection != nil && methodReferenceFactMatchesReceiver(declaration, selection.Recv())
+}
 
-	selectedReceiver := selection.Recv()
+func methodReferenceFactMatchesReceiver(declaration methodReferenceFact, selectedReceiver types.Type) bool {
 	selectedInterface, receiverIsInterface := selectedReceiver.Underlying().(*types.Interface)
 	if receiverIsInterface {
 		selectedInterface.Complete()

@@ -284,7 +284,11 @@ type Worker struct{}
 func (Worker) Run() string { return "run" }
 func Use(runner Runner) string { return runner.Run() }
 `)
-	writeAnalysisTestFile(t, filepath.Join(appDir, "go.mod"), "module example.com/app\n\ngo 1.26\n\nrequire example.com/contract v0.0.0\n")
+	writeAnalysisTestFile(
+		t,
+		filepath.Join(appDir, "go.mod"),
+		"module example.com/app\n\ngo 1.26\n\nrequire example.com/contract v0.0.0\n",
+	)
 	writeAnalysisTestFile(t, appFile, `package app
 
 import "example.com/contract"

@@ -7,6 +7,14 @@ param(
 $ErrorActionPreference = "Stop"
 
 $projectDir = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+# extension.toml is the release-version source shared with the Zed adapter.
+$manifest = [System.IO.File]::ReadAllText((Join-Path $projectDir "extension.toml"))
+$versions = [regex]::Matches($manifest, '(?m)^version = "((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))"\r?$')
+if ($versions.Count -ne 1) {
+    throw "expected exactly one stable semantic version in extension.toml"
+}
+$version = $versions[0].Groups[1].Value
+
 if ([string]::IsNullOrWhiteSpace($TargetOS)) {
     $TargetOS = (& go env GOOS).Trim()
 }
@@ -43,7 +51,11 @@ try {
 
     Push-Location (Join-Path $projectDir "server")
     try {
-        & go build -buildvcs=false -mod=readonly -trimpath "-ldflags=-s -w" -o $OutputPath ./cmd/go-codelens-ls
+        $lspPackage = & go list -mod=readonly -f '{{.ImportPath}}' ./internal/lsp
+        if ($LASTEXITCODE -ne 0) {
+            throw "go list failed with exit code $LASTEXITCODE"
+        }
+        & go build -buildvcs=false -mod=readonly -trimpath "-ldflags=-s -w -X=${lspPackage}.serverVersion=$version" -o $OutputPath ./cmd/go-codelens-ls
         if ($LASTEXITCODE -ne 0) {
             throw "go build failed with exit code $LASTEXITCODE"
         }

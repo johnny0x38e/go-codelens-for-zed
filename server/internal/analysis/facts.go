@@ -1,8 +1,6 @@
 package analysis
 
 import (
-	"cmp"
-	"encoding/binary"
 	"go/types"
 	"slices"
 	"strings"
@@ -35,18 +33,18 @@ const (
 )
 
 // symbolID is a compact, load-independent identity for a source declaration.
-// Its canonical encoding contains package path, owner, name, kind, and ordinal.
+// Its canonical encoding contains package path, owner, name, and kind.
 // PackageID is intentionally absent: production declarations duplicated in an
 // internal test variant must resolve to the same logical symbol.
 type symbolID string
 
-func newSymbolID(packagePath, owner, name string, kind symbolKind, ordinal uint32) symbolID {
+func newSymbolID(packagePath, owner, name string, kind symbolKind) symbolID {
 	if packagePath == "" || name == "" || kind == symbolInvalid {
 		return ""
 	}
 
 	var encoded strings.Builder
-	encoded.Grow(len(packagePath) + len(owner) + len(name) + 8)
+	encoded.Grow(len(packagePath) + len(owner) + len(name) + 4)
 	encoded.WriteString(packagePath)
 	encoded.WriteByte(0)
 	encoded.WriteString(owner)
@@ -54,9 +52,6 @@ func newSymbolID(packagePath, owner, name string, kind symbolKind, ordinal uint3
 	encoded.WriteString(name)
 	encoded.WriteByte(0)
 	encoded.WriteByte(byte(kind))
-	var ordinalBytes [4]byte
-	binary.BigEndian.PutUint32(ordinalBytes[:], ordinal)
-	encoded.Write(ordinalBytes[:])
 	return symbolID(encoded.String())
 }
 
@@ -66,15 +61,14 @@ func (id symbolID) valid() bool {
 
 func (id symbolID) name() string {
 	encoded := string(id)
-	if len(encoded) < 6 {
+	if len(encoded) < 2 {
 		return ""
 	}
-	identity := encoded[:len(encoded)-6]
-	separator := strings.LastIndexByte(identity, 0)
-	if separator < 0 {
+	_, name, found := strings.CutLast(encoded[:len(encoded)-2], "\x00")
+	if !found {
 		return ""
 	}
-	return identity[separator+1:]
+	return name
 }
 
 type declarationFact struct {
@@ -149,14 +143,10 @@ type packageFacts struct {
 	relationshipSensitive bool
 }
 
-func compareSymbolIDs(left, right symbolID) int {
-	return cmp.Compare(left, right)
-}
-
 func uniqueSortedSymbolIDs(ids []symbolID) []symbolID {
 	if len(ids) == 0 {
 		return nil
 	}
-	slices.SortFunc(ids, compareSymbolIDs)
+	slices.Sort(ids)
 	return slices.Compact(ids)
 }

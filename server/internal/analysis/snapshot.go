@@ -9,7 +9,12 @@ import (
 // identified by changedKeys. Untouched URI slices and target slices remain
 // shared with previous; callers must continue treating both snapshots as
 // immutable.
-func applyLensChanges(previous Snapshot, oldFacts, newFacts *factIndex, relationships *relationshipIndex, changedKeys []lensKey) Snapshot {
+func applyLensChanges(
+	previous Snapshot,
+	oldFacts, newFacts *factIndex,
+	relationships *relationshipIndex,
+	changedKeys []lensKey,
+) Snapshot {
 	if len(changedKeys) == 0 {
 		return previous
 	}

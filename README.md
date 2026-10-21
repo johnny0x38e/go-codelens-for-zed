@@ -2,124 +2,105 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Shows Go references and interface implementations as CodeLens entries in Zed.
+Shows Go references and interface implementations as CodeLens entries in Zed. A CodeLens entry is the small clickable label above a declaration.
 
-## Why this project exists
+Go interfaces are implemented implicitly, so an interface does not list its implementers and a concrete type does not say which interfaces it satisfies. `gopls` remains the primary Go language server but does not provide this relationship view. Go CodeLens runs as a separate auxiliary language server beside it, adds reference and implementation entries, and leaves completion, diagnostics, formatting, rename, and other Go editing features to `gopls`.
 
-Go interfaces are implemented implicitly. That makes the language flexible, but it also means an important relationship is often invisible at the declaration site: an interface does not list its implementers, and a concrete type does not declare which interfaces it satisfies. For day-to-day navigation and review, being able to see those relationships immediately is extremely valuable.
-
-`gopls` remains the right primary language server for Go, but it does not currently provide the relationship-oriented CodeLens view this project needs. Go CodeLens therefore runs as a focused auxiliary language server beside `gopls`; it adds reference and implementation lenses without proxying or replacing any of the normal Go tooling.
-
-The project was inspired by [Go Implementation Lens for Visual Studio Code](https://github.com/anirudhagarwal365/go-implementation-lens), created by [Anirudh Agarwal](https://github.com/anirudhagarwal365). Its workflow and presentation proved how useful this information can be. This repository is an independent implementation for Zed, built around Go's type system and further engineered for exact results, incremental analysis, low allocation overhead, and minimal disk I/O.
-
-## Screenshot
+The project was inspired by [Go Implementation Lens for Visual Studio Code](https://github.com/anirudhagarwal365/go-implementation-lens), created by [Anirudh Agarwal](https://github.com/anirudhagarwal365). This repository is an independent implementation for Zed, built on Go's type system.
 
 <img src="assets/screenshot.png" alt="CodeLens">
 
 ## Features
 
 - `0 references`, `1 reference`, or `N references` on interfaces, functions, and methods.
-- Reference counts on used named types, package variables, constants, named struct fields, and type parameters. Unused declarations in these categories are hidden to reduce noise.
-- `N implementations` on named interfaces and explicit interface methods, with exact navigation targets.
-- `Implements: Interface` on named types and `Implements: Interface.Method` on receiver methods. Multiple relationships are displayed together.
-- Complete support for internal and external `_test.go` package variants.
-- Multi-module analysis through the nearest applicable `go.work`; ordinary modules work without a work file.
-- Immediate analysis of unsaved edits through incremental LSP document synchronization.
+- Reference counts on used named types, package-level variables, constants, named struct fields, and type parameters; unused declarations in these categories are hidden.
+- `N implementations` on named interfaces and explicit interface methods, with accurate navigation targets.
+- `Implements: Interface` on named types and `Implements: Interface.Method` on receiver methods; a declaration that satisfies several interfaces shows all of them.
+- Handles internal and external `_test.go` test packages.
+- Uses the nearest `go.work` file (Go's workspace file) for multi-module projects; single-module projects need no work file.
+- Applies incremental document changes from the editor, so unsaved edits are analyzed immediately.
 
-Full interface relationships are decided by `go/types.Implements`, including pointer method sets and promoted methods. Method relationships first use the package-aware Go method identity and then require a `types.Identical` signature. Reference counts are also semantic: they join `go/types.Info.Defs` and `go/types.Info.Uses`, exclude declaration locations, collapse duplicate production/test-variant locations, and never count unrelated symbols merely because their names match.
+Interface relationships use `go/types.Implements`, including pointer receivers and promoted methods. Method relationships require the same package and name plus a `types.Identical` signature. Reference counts come from `go/types.Info.Defs` and `go/types.Info.Uses`; declaration sites are excluded, duplicate locations from production and test packages are merged, and unrelated symbols with the same name are ignored.
 
-## Architecture
+## How it works
 
 ```text
-Zed Editor
-├── gopls                         primary Go language features
+Zed
+├── gopls                    primary Go language server
 └── Go CodeLens extension
-    ├── src/lib.rs                small Rust/Wasm Zed adapter
-    └── go-codelens-ls            native, cgo-free Go LSP sidecar
-        ├── internal/lsp          JSON-RPC, document sync, caches, cancellation
-        └── internal/analysis     scopes, type facts, indexes, relationships
-            └── go/packages + go/ast + go/types
+    ├── src/lib.rs           Rust/WebAssembly adapter
+    └── go-codelens-ls       auxiliary CodeLens language server (separate process)
 ```
 
-The adapter first looks for `go-codelens-ls` on the worktree `PATH`, which keeps local development overrides simple. If none is present, it selects the matching versioned GitHub Release asset, verifies it against `SHA256SUMS`, and caches the native binary in Zed's extension work directory. The sidecar then discovers the applicable module or `go.work` scope, loads a coherent Go type universe, extracts compact semantic facts, and returns standard LSP CodeLens commands. Keeping the sidecar independent lets `gopls` continue to own completion, diagnostics, formatting, rename, and the rest of the Go editor experience.
+The adapter looks for `go-codelens-ls` on the project's `PATH`; if absent, it downloads the matching GitHub Release file, verifies it against `SHA256SUMS`, and caches the executable in Zed's extension work directory. The CodeLens server finds the module or `go.work` workspace, loads one consistent set of type information, and returns standard CodeLens results over the Language Server Protocol (LSP). The server entry point is `server/cmd/go-codelens-ls`; implementation packages live under `server/internal`.
 
-The Go entry point intentionally follows the conventional layout `server/cmd/go-codelens-ls`, while implementation packages remain under `server/internal` because they are not a public Go API.
-
-## Technical design
-
-- **Exact semantics:** relationships are verified by `go/types`; name-based indexes only narrow candidate sets and never determine correctness.
-- **Incremental engine:** body edits recheck known package owners, API edits recheck the reverse dependency closure, and structural/module changes fall back to one complete `packages.Load`.
-- **Immutable revisions:** package facts, relationship indexes, and snapshots use copy-on-write updates, allowing concurrent readers to share unchanged maps, slices, and target lists safely.
-- **Fast document editing:** a UTF-8 gap buffer and line-start index apply incremental UTF-16 LSP edits without rebuilding the full document.
-- **Bounded concurrency and caches:** same-revision requests share one analysis flight; stale work cannot publish, abandoned work is canceled, and retained scope/snapshot caches have fixed bounds.
-- **Low disk activity:** only exact lifecycle or compiled-source reads are performed. By default the plugin writes no logs, semantic index, or persistent cache; an explicit `GO_CODELENS_TRACE` opt-in may write protocol method traces, and Go tooling may use the standard Go build cache during package loading.
-- **Deterministic output:** lenses and navigation targets are sorted, deduplicated, and represented with correct LSP UTF-16 positions.
-- **Portable and verified delivery:** the cgo-free Go sidecar supports macOS, Linux, and Windows on arm64 and x86-64. Release assets are version-pinned and SHA-256 verified; native tests and builds on all six targets are release gates.
+- **Exact results:** every relationship is checked by `go/types`; name-based indexes only narrow candidates.
+- **Incremental analysis:** body edits recheck the packages that own the changed files, API edits recheck their dependents, and structural or module changes fall back to a full `packages.Load`.
+- **Read-only results:** updates copy only changed data, so readers share unchanged maps, slices, and target lists; outdated results are never returned.
+- **Fast edits:** a UTF-8 text buffer with a line-start index applies UTF-16 edits without rebuilding the document.
+- **Bounded concurrency and caches:** requests for the same document version share one analysis, abandoned work is canceled, and module and result caches have fixed limits.
+- **Low disk I/O:** files are read only for opened or changed documents and exact compiled-source paths; by default it writes no logs, index, or persistent cache. `GO_CODELENS_TRACE` records LSP method calls.
+- **Stable and portable:** output is sorted, deduplicated, and uses LSP UTF-16 positions; the CodeLens server is built without a C compiler and supports macOS, Linux, and Windows on arm64 and x86-64, with SHA-256-checked releases.
 
 ## Performance
 
-Performance work is guarded by unit, differential, integration, fuzz, race, allocation, cancellation, and end-to-end benchmark coverage. The first large-project acceptance fixture used an unmodified shallow checkout of Kubernetes on an Apple M1 Pro with Go 1.26.5.
+Tested on an unmodified shallow Kubernetes checkout (no full history) on an Apple M1 Pro with Go 1.26.5.
 
-| Kubernetes fixture            |                                      Value |
-| ----------------------------- | -----------------------------------------: |
-| Commit                        | `b882c60b4023bdf09264c2d5d30a2cadebc240fb` |
-| Checkout size                 |                                    395 MiB |
-| Tracked non-vendor Go files   |                                     13,414 |
-| Modules in `go.work`          |                                         34 |
-| Packages across the workspace |                                      3,029 |
-| Sample document               |                   `pkg/probe/exec/exec.go` |
+| Kubernetes test checkout                          |                                      Value |
+| ------------------------------------------------- | -----------------------------------------: |
+| Commit                                            | `b882c60b4023bdf09264c2d5d30a2cadebc240fb` |
+| Checkout size                                     |                                    395 MiB |
+| Go files under version control (excluding vendor) |                                     13,414 |
+| Modules in `go.work`                              |                                         34 |
+| Packages in the workspace                         |                                      3,029 |
+| File used for the CodeLens request                |                   `pkg/probe/exec/exec.go` |
 
 | Measurement                                        |     Result |
 | -------------------------------------------------- | ---------: |
 | First full workspace analysis and CodeLens request |  4m42.692s |
-| Same-process semantic snapshot cache hit           | 249.958 µs |
+| Repeat request in the same process (cached result) | 249.958 µs |
 | CodeLens entries returned                          |         10 |
-| Canceled request return latency                    |   4.542 µs |
-| Underlying analyzer cancellation latency           |   1.967 ms |
-| Maximum resident set size                          |   3.69 GiB |
-| macOS peak memory footprint                        |   6.66 GiB |
-| Swaps                                              |          0 |
+| Time to return after a request is canceled         |   4.542 µs |
+| Time for the analyzer to stop after cancellation   |   1.967 ms |
+| Peak process memory                                |   3.69 GiB |
+| Peak memory reported by macOS                      |   6.66 GiB |
+| Swap used                                          |          0 |
 
-This is a single real-project acceptance observation, not a statistically sampled benchmark. The cold result intentionally covers all 34 work-file modules with tests enabled; its dominant cost is the initial `packages.Load`/Go toolchain package graph. Once published, the immutable semantic snapshot serves repeated requests in microseconds without re-entering the analyzer. All ten expected Kubernetes lenses were preserved.
+This is one observation, not a sampled benchmark. The first analysis includes all 34 modules with tests enabled; most of the time is the initial `packages.Load`. Cached repeat requests return in microseconds, and all ten expected CodeLens entries were present.
 
-Run `./scripts/benchmark-server.sh` to execute the maintained correctness, race, benchmark, allocation, and profile suite. Profiles default to a directory under `$TMPDIR`, outside the repository.
+`just bench` runs the correctness, race, benchmark, allocation, and profiling tests; profiles go under `$TMPDIR`.
 
 ## Development and build
 
-Requirements for this checkout:
+Requirements: Zed 1.14.2+, Go 1.27+, Rust with `wasm32-wasip2`, just 1.56+, and golangci-lint.
 
-- Zed 1.14.2 or newer
-- Go 1.26 or newer
-- Rust installed through `rustup`, including the `wasm32-wasip2` target
+Build and install the CodeLens server for the current host with `just install` (default `~/.local/bin`; set `GO_CODELENS_BIN_DIR` if Zed uses another directory). Marketplace installs need no local tools: when there is no `PATH` override, Zed downloads the matching binary.
 
-For local development on macOS or Linux, build the current host binary and install it to `~/.local/bin`:
+| Command | Purpose |
+| --- | --- |
+| `just build` / `just build linux amd64` | Build the host server or a specific target |
+| `just build-wasm` | Build the WebAssembly adapter |
+| `just install` | Build and install the host server |
+| `just fmt` | Format Go, Rust, and the justfile |
+| `just test` / `just race` | Run tests / the race detector |
+| `just vet` / `just lint` | Run `go vet` / lint Go and Rust |
+| `just check` | Run the complete local verification suite |
+| `just bench` | Run tests, benchmarks, and profiling |
+| `just set-version 0.3.3` | Update release versions |
+| `just check-version` | Check release version consistency |
 
-```sh
-./scripts/install-server.sh
-```
-
-On Windows, run the equivalent PowerShell installer:
-
-```powershell
-pwsh -File .\scripts\install-server.ps1
-```
-
-`~/.local/bin` is only the development installer's default, not a fixed Zed extension location. Set `GO_CODELENS_BIN_DIR` when Zed inherits a different directory on `PATH`. Marketplace installations need neither script: when no PATH override exists, Zed downloads the version-matched binary into its own platform-dependent extension work directory.
-
-The build scripts also accept explicit targets, which is useful for checking all build outputs from one machine:
+`just build [os] [arch] [output]` accepts the same targets and output path as the build scripts; relative paths start at the repository root:
 
 ```sh
-./scripts/build-server.sh linux amd64
-./scripts/build-server.sh windows arm64
+just build windows arm64
+just build linux amd64 bin/custom-server
 ```
 
-```powershell
-pwsh -File .\scripts\build-server.ps1 -TargetOS windows -TargetArch arm64
-```
+On Windows, `just` runs tasks through Git Bash's `sh`, so `sh` must be on `PATH`; build and install call PowerShell 7 (`pwsh`) directly, and version checks also need `awk`.
 
-Supported release targets are:
+Supported targets:
 
-| Operating system | Architecture | Release target triple       |
+| Operating system | Architecture | Release target identifier   |
 | ---------------- | ------------ | --------------------------- |
 | macOS            | arm64        | `aarch64-apple-darwin`      |
 | macOS            | x86-64       | `x86_64-apple-darwin`       |
@@ -128,41 +109,19 @@ Supported release targets are:
 | Windows          | arm64        | `aarch64-pc-windows-msvc`   |
 | Windows          | x86-64       | `x86_64-pc-windows-msvc`    |
 
-After installing a local sidecar, run `zed: install dev extension` and select this repository, or run `zed: rebuild dev extension` after subsequent changes. The checked-in `.zed/settings.json` keeps `gopls` and `go-codelens` active together.
+After installing the CodeLens server, run `zed: install dev extension` and select this repository, or `zed: rebuild dev extension` after changes. `.zed/settings.json` keeps `gopls` and `go-codelens` active together.
 
-Run the full local verification seams with:
+`just check` runs the full suite. Tasks set `GOWORK=off`, use `TMPDIR`/`TEMP`/`/tmp` for temporary files, and put `GOCACHE` in `go-build-cache` under that directory (an existing `GOCACHE` is kept). Race sets `GOMAXPROCS=1` for the Go 1.27 `go/types` issue in `AGENTS.md`; `BENCHMARK_OUTPUT_DIR` selects another output directory.
 
-```sh
-cd server
-env GOWORK=off TMPDIR=/tmp GOCACHE=/tmp/go-build-cache go test ./...
-env GOWORK=off TMPDIR=/tmp GOCACHE=/tmp/go-build-cache go test -race ./...
-env GOWORK=off TMPDIR=/tmp GOCACHE=/tmp/go-build-cache go vet ./...
-golangci-lint run --config ../.golangci.yaml ./...
-cd ..
-cargo fmt -- --check
-cargo test
-cargo build --target wasm32-wasip2
-```
-
-Prepare a release version with one command:
-
-```sh
-./scripts/set-version.sh 0.3.3
-```
-
-The script prepares all edits before touching the working tree, synchronizes `extension.toml`, `Cargo.toml`, `Cargo.lock`, and the native server's reported version, then validates the locked Cargo metadata. If validation fails, it restores the original files. The release workflow calls the same script in read-only `--check` mode so local preparation and CI cannot drift apart.
-
-CI runs the Go suite and cgo-free build on native GitHub-hosted runners for all six targets, plus the race detector on Linux amd64 and the Rust/Wasm checks separately. A tag named `v<version>` triggers the release workflow only when the tag, `Cargo.toml`, `extension.toml`, and the native server's reported version match. The workflow publishes six raw native binaries and a deterministic `SHA256SUMS`; the extension adapter only downloads assets for its own exact version.
-
-`examples/poc/main.go` is the small functional fixture. Native binaries, benchmark profiles, and `extension.wasm` are intentionally excluded from version control.
+`just set-version 0.3.3` updates the version fields in `extension.toml`, `Cargo.toml`, and `Cargo.lock` and restores them if validation fails. Builds inject the version; direct `go build` or `go run` reports `dev`. CI runs tests and builds that do not need a C compiler on all six targets, the race detector on Linux amd64, and Rust/WebAssembly checks. A matching `v<version>` tag publishes six executables and `SHA256SUMS`; the extension downloads only files for its own version.
 
 ## Current Zed limitations
 
-- On Zed 1.14.2, a multi-target CodeLens compatibility command opens a multibuffer even when `lsp_results_location` is set to `"picker"`. Picker behavior for CodeLens requires an upstream Zed capability.
-- CodeLens typography is controlled by Zed's editor settings; the LSP and extension APIs do not expose per-lens font styling.
-- Zed's extension API does not expose the VSCode extension's custom gutter decorations or tree-view sidebar. Their essential relationship data is represented through navigable CodeLens entries.
-- Dependencies outside the selected module/`go.work` scope contribute type information but do not receive lenses. Empty interfaces intentionally report zero useful implementations.
-- A marketplace version requires a matching `v<version>` GitHub Release containing all six binaries and `SHA256SUMS`; a development checkout can continue to use a PATH-installed sidecar before that release exists.
+- As of Zed 1.16.2, clicking a multi-target CodeLens always opens Zed's multibuffer; that path ignores `lsp_results_location`, so `"picker"` does not affect CodeLens clicks. Picker results still work through Zed navigation, such as cmd-clicking a symbol or binding `editor: find all references` with `"open_results_in": "picker"`; changing CodeLens clicks needs support from Zed itself.
+- CodeLens font styling follows Zed's editor settings; the LSP and extension APIs do not support per-entry fonts.
+- Zed's extension API does not expose the VS Code extension's custom gutter decorations or tree-view sidebar; relationship data is shown as clickable CodeLens entries.
+- Dependencies outside the selected module or `go.work` workspace provide type information but no CodeLens entries. Empty interfaces report zero useful implementations.
+- Marketplace versions need a matching `v<version>` GitHub Release with all six executables and `SHA256SUMS`; a development copy can use a `go-codelens-ls` on `PATH` before that release exists.
 
 ## License
 

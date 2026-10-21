@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johnny/go-codelens-for-zed/server/internal/testutil"
+	"github.com/johnny0x38e/go-codelens-for-zed/server/internal/testutil"
 	"golang.org/x/tools/go/packages"
 )
 
@@ -73,7 +73,10 @@ func TestScopeIndexOwnsNormalInternalAndExternalTestFiles(t *testing.T) {
 	}
 
 	dependent := findPackageStateForTest(t, index, "example.com/index-primary/pkg001", "")
-	closure := index.reverseClosure([]string{base.id})
+	closure, err := index.reverseClosure([]string{base.id})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !slices.Contains(closure, dependent.id) {
 		t.Fatalf("reverse closure for %q = %q, want dependent %q", base.id, closure, dependent.id)
 	}
@@ -86,8 +89,9 @@ func TestScopeIndexOwnsNormalInternalAndExternalTestFiles(t *testing.T) {
 			t.Fatalf("reverse closure contains unrelated package %q", packageID)
 		}
 	}
-	if second := index.reverseClosure([]string{base.id}); !reflect.DeepEqual(second, closure) {
-		t.Fatalf("reverse closure changed between calls: %q then %q", closure, second)
+	second, err := index.reverseClosure([]string{base.id})
+	if err != nil || !reflect.DeepEqual(second, closure) {
+		t.Fatalf("reverse closure changed between calls: %q then %q (error: %v)", closure, second, err)
 	}
 }
 
@@ -219,7 +223,9 @@ func TestScopeIndexReplacementRejectsMixedTypeUniverses(t *testing.T) {
 		types:       newDependencyTypes,
 		facts:       newDependencyFacts,
 	}
-	if _, replaceErr := index.withPackageStates(map[string]*packageState{dependency.id: newDependency}); replaceErr == nil {
+	if _, replaceErr := index.withPackageStates(
+		map[string]*packageState{dependency.id: newDependency},
+	); replaceErr == nil {
 		t.Fatal("withPackageStates() accepted a dependent that still imports the old type universe")
 	}
 

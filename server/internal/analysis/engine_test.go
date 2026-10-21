@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/johnny/go-codelens-for-zed/server/internal/testutil"
+	"github.com/johnny0x38e/go-codelens-for-zed/server/internal/testutil"
 )
 
 func TestEngineMatchesFullAnalysisExactly(t *testing.T) {
@@ -230,7 +230,15 @@ func TestEngineFailedAnalysisReleasesScopeControl(t *testing.T) {
 	const scopeCount = 128
 	for index := range scopeCount {
 		scope := ModuleAnalysisScope(filepath.Join(root, "scope-"+strconv.Itoa(index)))
-		if _, err := engine.Analyze(context.Background(), scope, NewChangeSet(), nil); !errors.Is(err, errAnalysisFailed) {
+		if _, err := engine.Analyze(
+			context.Background(),
+			scope,
+			NewChangeSet(),
+			nil,
+		); !errors.Is(
+			err,
+			errAnalysisFailed,
+		) {
 			t.Fatalf("Engine.Analyze() scope %d error = %v, want %v", index, err, errAnalysisFailed)
 		}
 	}
@@ -368,8 +376,8 @@ func TestEngineReusesUnchangedStateAndRejectsStalePublication(t *testing.T) {
 	<-started
 	engine.InvalidateScope(scope.CacheKey())
 	close(release)
-	if err := <-result; err != nil {
-		t.Fatalf("stale Engine.Analyze() error = %v", err)
+	if analyzeErr := <-result; analyzeErr != nil {
+		t.Fatalf("stale Engine.Analyze() error = %v", analyzeErr)
 	}
 
 	engine.mu.RLock()
@@ -463,7 +471,9 @@ func TestEngineUsesExactConservativeFallbackReasons(t *testing.T) {
 			change: sourceContentChange,
 			overlay: func(sourceFile string) map[string][]byte {
 				return map[string][]byte{
-					sourceFile: []byte("package sample\n\nimport \"fmt\"\n\nfunc Value() int { return len(fmt.Sprint(1)) }\n"),
+					sourceFile: []byte(
+						"package sample\n\nimport \"fmt\"\n\nfunc Value() int { return len(fmt.Sprint(1)) }\n",
+					),
 				}
 			},
 			wantReason: fallbackUncachedImport,
@@ -505,7 +515,9 @@ func TestEngineUsesExactConservativeFallbackReasons(t *testing.T) {
 			change:   sourceContentChange,
 			overlay: func(sourceFile string) map[string][]byte {
 				return map[string][]byte{
-					sourceFile: []byte("package sample\n\nimport \"fmt\"\n\nfunc Value() int { return len(fmt.Sprint(2)) }\n"),
+					sourceFile: []byte(
+						"package sample\n\nimport \"fmt\"\n\nfunc Value() int { return len(fmt.Sprint(2)) }\n",
+					),
 				}
 			},
 			mutate:     deleteRetainedImports,

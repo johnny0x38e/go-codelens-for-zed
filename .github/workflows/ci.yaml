@@ -113,6 +113,10 @@ jobs:
               working-directory: server
               env:
                   GOWORK: "off"
+                  # golang/go#81122: one type-checking token avoids an upstream
+                  # go/types race between concurrent go/packages checkers.
+                  # Remove once the pinned Go toolchain includes CL 841585.
+                  GOMAXPROCS: "1"
               run: go test -mod=readonly -race ./...
 
     lint:

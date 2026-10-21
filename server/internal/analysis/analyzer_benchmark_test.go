@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/johnny/go-codelens-for-zed/server/internal/testutil"
+	"github.com/johnny0x38e/go-codelens-for-zed/server/internal/testutil"
 )
 
 var benchmarkAnalysisSnapshot Snapshot
@@ -106,15 +106,20 @@ func repositoryFixtureModuleDir(b *testing.B) string {
 
 func BenchmarkCollectImplementationRelationshipsSparse(b *testing.B) {
 	interfaces, concreteTypes := benchmarkTypeDeclarations(128, 2048)
+	factsByPackage := map[string]*packageFacts{
+		"contracts":       {interfaces: interfaces},
+		"implementations": {namedTypes: concreteTypes},
+	}
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
 		interfaceTargets := make(map[Location][]Location)
 		typeInterfaces := make(map[Location][]namedRelationship)
-		collectFactImplementationRelationships(
-			interfaces,
-			concreteTypes,
+		collectPackageFactImplementationRelationships(
+			factsByPackage,
+			len(interfaces),
+			len(concreteTypes),
 			interfaceTargets,
 			typeInterfaces,
 		)
@@ -140,7 +145,15 @@ func BenchmarkRelationshipCandidates(b *testing.B) {
 		!reflect.DeepEqual(directInterfaces, indexed.typeInterfaces) {
 		b.Fatal("persistent candidate index changed exact implementation relationships")
 	}
-	if got, want := snapshotFromIndexes(facts, indexed), snapshotFromFacts(factsByPackage); !reflect.DeepEqual(got.lensMap(), want.lensMap()) {
+	if got, want := snapshotFromIndexes(
+		facts,
+		indexed,
+	), snapshotFromFacts(
+		factsByPackage,
+	); !reflect.DeepEqual(
+		got.lensMap(),
+		want.lensMap(),
+	) {
 		b.Fatal("persistent candidate index changed the final Snapshot")
 	}
 
@@ -190,7 +203,6 @@ func benchmarkRelationshipFacts(
 			"",
 			declaration.name,
 			symbolType,
-			0,
 		)
 		interfaceFacts.declarations = append(interfaceFacts.declarations, declarationFact{
 			id:       declaration.id,
@@ -209,7 +221,6 @@ func benchmarkRelationshipFacts(
 			"",
 			declaration.name,
 			symbolType,
-			0,
 		)
 		concreteFacts.declarations = append(concreteFacts.declarations, declarationFact{
 			id:       declaration.id,

@@ -12,11 +12,12 @@ Correctness and performance are both release requirements. Optimizations must pr
 
 - `src/lib.rs`: thin Rust/Wasm Zed adapter. It validates the platform, honors a worktree `PATH` override, and otherwise downloads the exact versioned native server after SHA-256 verification.
 - `server/cmd/go-codelens-ls`: native server entry point. Keep command wiring small.
-- `server/internal/lsp`: JSON-RPC/LSP transport, protocol types, document synchronization, caches, request coalescing, and cancellation.
-- `server/internal/analysis`: scope discovery, semantic fact extraction, incremental type checking, indexes, relationships, and immutable snapshots.
+- `server/internal/lsp`: `server.go` owns the message loop and dispatch; `transport.go` owns framing and request cancellation; `cache.go` caches paths and scopes; `snapshots.go` owns snapshot caching, coalescing, and invalidation; `watch.go` handles file watching and refresh; `lenses.go` serves semantic lenses. Document synchronization and protocol types remain separate.
+- `server/internal/analysis`: `analyzer.go` coordinates full analysis; `scope.go` discovers modules/workspaces; `load.go` loads packages; `fingerprint.go` computes syntax fingerprints; `recheck.go` plans incremental work; `typecheck.go` rechecks retained packages; `rematch.go` rebuilds method-reference matches. Fact extraction, indexes, relationships, snapshot construction, lens formatting, and source locations stay in their own files.
 - `server/internal/testutil`: deterministic Go fixtures shared by tests and benchmarks.
 - `examples/poc`: small manual acceptance fixture.
-- `scripts`: development build, install, and benchmark entry points.
+- `justfile`: local tasks grouped as `build`, `check`, `perf`, and `release`. Run `just` to list tasks, or `just --list --group build` to filter a group. Keep build, install, benchmark, and version logic in `scripts`, which CI can also call directly.
+- `scripts`: standalone development build, install, benchmark, and version helpers.
 - `README.md` and `README.zh-CN.md`: public English and Chinese project documentation; keep them semantically synchronized.
 
 Keep the package boundary `cmd/go-codelens-ls -> internal/lsp -> internal/analysis`. The `internal` packages are implementation details, not a public Go API. Do not move packages merely to shorten import paths or mix package-layout churn into performance work.
@@ -62,29 +63,32 @@ Keep the package boundary `cmd/go-codelens-ls -> internal/lsp -> internal/analys
 
 ## Tests and verification
 
-Run the narrowest relevant test while iterating, then run the full seams before handoff:
+Run the narrowest relevant test while iterating, then run the full seams before handoff (just 1.56+):
 
 ```sh
-cd server
-env GOWORK=off TMPDIR=/tmp GOCACHE=/tmp/go-build-cache go test ./...
-env GOWORK=off TMPDIR=/tmp GOCACHE=/tmp/go-build-cache go test -race ./...
-env GOWORK=off TMPDIR=/tmp GOCACHE=/tmp/go-build-cache go vet ./...
-golangci-lint run --config ../.golangci.yaml ./...
-cd ..
-cargo fmt -- --check
-cargo test
-cargo build --target wasm32-wasip2
+just check
 ```
 
-Use `./scripts/benchmark-server.sh` for the maintained benchmark/profile suite. Its profiles belong outside the repository. Differential tests should compare optimized paths with the full semantic analyzer; algorithm tests should preserve adversarial cases such as embedding, pointer receivers, test variants, UTF-16 surrogate pairs, cancellation, and stale revisions.
+This checks version metadata and justfile/Rust formatting, runs Go and Rust tests,
+the Go race detector, vet, golangci-lint (including Go formatting), Cargo Clippy,
+and the Wasm build. The recipes set `GOWORK=off` and preserve existing `TMPDIR`
+and `GOCACHE` overrides. The race recipe sets `GOMAXPROCS=1` for golang/go#81122:
+x/tools sizes its type-checking semaphore at init, and Go 1.27 has an upstream
+race between concurrent checkers. Remove that workaround once the toolchain
+includes CL 841585. Windows tasks run through Git Bash's `sh`; the build and
+install recipes invoke PowerShell 7 explicitly, and version checks also need
+`awk` on `PATH`.
+
+Use `just bench` (or `./scripts/benchmark-server.sh`) for the maintained benchmark/profile suite. Its profiles belong outside the repository. Differential tests should compare optimized paths with the full semantic analyzer; algorithm tests should preserve adversarial cases such as embedding, pointer receivers, test variants, UTF-16 surrogate pairs, cancellation, and stale revisions.
 
 ## Documentation and releases
 
 - Keep public behavior, limitations, commands, platform claims, and performance figures aligned in both READMEs.
 - The local `PERFORMANCE.md` and `PERFORMANCE.zh-CN.md` files are private working notebooks and are intentionally ignored. Do not add them to Git or link public documentation to them.
-- Use `./scripts/set-version.sh <version>` to synchronize `extension.toml`,
-  `Cargo.toml`, `Cargo.lock`, and `server/internal/lsp/server.go`; do not update
-  those version fields independently.
+- Use `just set-version <version>` (or `./scripts/set-version.sh <version>`) to synchronize `extension.toml`,
+  `Cargo.toml`, and `Cargo.lock`; do not update those version fields independently.
+  Native build scripts inject the version from `extension.toml` through linker
+  flags. Direct Go builds report `dev`; never hardcode a release version in Go.
 - Native binaries, benchmark profiles, build directories, and `extension.wasm` are generated artifacts and must not be committed.
 - Release assets are six versioned, cgo-free native binaries plus `SHA256SUMS`. Keep target naming synchronized between the build scripts, Rust adapter, and GitHub workflows.
 - GitHub CI must exercise the six supported targets on native runners. Local cross-compilation remains a useful buildability check, not release proof.

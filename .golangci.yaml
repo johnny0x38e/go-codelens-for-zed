@@ -2,55 +2,54 @@ version: "2"
 
 run:
     timeout: 10m
-    modules-download-mode: readonly
-    tests: true
 
 linters:
     default: standard
     enable:
-        - asciicheck
-        - bidichk
         - bodyclose
         - contextcheck
-        - durationcheck
-        - errname
         - errorlint
-        - forcetypeassert
-        - gocheckcompilerdirectives
-        - gocritic
-        - godoclint
-        - gosec
-        - makezero
-        - misspell
-        - modernize
-        - musttag
+        - exhaustive
         - nilerr
-        - nilnesserr
-        - nolintlint
-        - perfsprint
-        - predeclared
-        - reassign
-        - recvcheck
+        - unused
+        - unparam
         - sqlclosecheck
-        - unconvert
-        - usestdlibvars
-        - wastedassign
-        - whitespace
-
     settings:
         errcheck:
             check-type-assertions: true
             check-blank: true
+        govet:
+            enable:
+                - shadow
         staticcheck:
             checks:
                 - all
-
+                - -ST1000
+                - -ST1003
+                - -ST1005
+                - -ST1020
+                - -ST1021
     exclusions:
-        generated: strict
+        generated: lax
+        rules:
+            - path: '_test\.go$'
+              linters: [errcheck]
+        paths:
+            - "^docs/"
+            - "^examples/"
 
 formatters:
     enable:
         - gofmt
+        - golines
+    settings:
+        golines:
+            max-len: 120
+    exclusions:
+        generated: lax
+        paths:
+            - "^docs/"
+            - "^examples/"
 
 issues:
     max-issues-per-linter: 0

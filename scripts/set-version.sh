@@ -62,8 +62,6 @@ metadata_value() {
                     in_target_package = 1
                 }
                 target = (in_target_package && $0 ~ /^version = "[^"]+"$/)
-            } else if (kind == "server") {
-                target = ($0 ~ /^[[:space:]]*serverVersion[[:space:]]*=/)
             }
 
             if (target) {
@@ -102,18 +100,15 @@ verify_version() {
     extension=$(metadata_value read extension "$project_dir/extension.toml")
     cargo=$(metadata_value read cargo "$project_dir/Cargo.toml")
     lock=$(metadata_value read lock "$project_dir/Cargo.lock")
-    server=$(metadata_value read server "$project_dir/server/internal/lsp/server.go")
 
     if [ "$extension" != "$version" ] ||
         [ "$cargo" != "$version" ] ||
-        [ "$lock" != "$version" ] ||
-        [ "$server" != "$version" ]; then
+        [ "$lock" != "$version" ]; then
         printf '%s\n' \
             "version metadata does not match $version:" \
             "  extension.toml:                 $extension" \
             "  Cargo.toml:                     $cargo" \
-            "  Cargo.lock:                     $lock" \
-            "  server/internal/lsp/server.go:  $server" >&2
+            "  Cargo.lock:                     $lock" >&2
         return 1
     fi
 }
@@ -124,7 +119,7 @@ if [ "$mode" = check ]; then
     exit 0
 fi
 
-for command_name in awk cargo gofmt mktemp; do
+for command_name in awk cargo mktemp; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         echo "required command not found: $command_name" >&2
         exit 1
@@ -132,7 +127,7 @@ for command_name in awk cargo gofmt mktemp; do
 done
 
 temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/go-codelens-version.XXXXXX")
-mkdir -p "$temporary_directory/generated" "$temporary_directory/backup/server/internal/lsp"
+mkdir -p "$temporary_directory/generated" "$temporary_directory/backup"
 
 # All rewrites are prepared before the working tree is touched. Once applied,
 # the EXIT trap restores every original file unless all validation completes.
@@ -145,8 +140,6 @@ cleanup() {
         cp "$temporary_directory/backup/extension.toml" "$project_dir/extension.toml"
         cp "$temporary_directory/backup/Cargo.toml" "$project_dir/Cargo.toml"
         cp "$temporary_directory/backup/Cargo.lock" "$project_dir/Cargo.lock"
-        cp "$temporary_directory/backup/server/internal/lsp/server.go" \
-            "$project_dir/server/internal/lsp/server.go"
         echo "version update failed; restored the original metadata" >&2
     fi
     rm -rf "$temporary_directory"
@@ -163,14 +156,10 @@ metadata_value write cargo "$project_dir/Cargo.toml" \
     >"$temporary_directory/generated/Cargo.toml"
 metadata_value write lock "$project_dir/Cargo.lock" \
     >"$temporary_directory/generated/Cargo.lock"
-metadata_value write server "$project_dir/server/internal/lsp/server.go" \
-    >"$temporary_directory/generated/server.go"
 
 cp "$project_dir/extension.toml" "$temporary_directory/backup/extension.toml"
 cp "$project_dir/Cargo.toml" "$temporary_directory/backup/Cargo.toml"
 cp "$project_dir/Cargo.lock" "$temporary_directory/backup/Cargo.lock"
-cp "$project_dir/server/internal/lsp/server.go" \
-    "$temporary_directory/backup/server/internal/lsp/server.go"
 
 # Apply the prepared set only after every generated file passed its structural
 # checks. Cargo then verifies that the edited manifest and lock remain coherent.
@@ -178,9 +167,7 @@ applied=1
 cp "$temporary_directory/generated/extension.toml" "$project_dir/extension.toml"
 cp "$temporary_directory/generated/Cargo.toml" "$project_dir/Cargo.toml"
 cp "$temporary_directory/generated/Cargo.lock" "$project_dir/Cargo.lock"
-cp "$temporary_directory/generated/server.go" "$project_dir/server/internal/lsp/server.go"
 
-gofmt -w "$project_dir/server/internal/lsp/server.go"
 (cd "$project_dir" && cargo metadata --locked --no-deps --format-version 1 >/dev/null)
 verify_version
 

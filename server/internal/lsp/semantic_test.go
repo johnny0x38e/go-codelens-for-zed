@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/johnny/go-codelens-for-zed/server/internal/analysis"
+	"github.com/johnny0x38e/go-codelens-for-zed/server/internal/analysis"
 )
 
 func TestServeReturnsLensesForRepositoryFixtureWithoutDidOpen(t *testing.T) {
@@ -57,8 +57,16 @@ func TestServeAnalyzesAllGoWorkModules(t *testing.T) {
 	if err := os.MkdirAll(appModule, 0o700); err != nil {
 		t.Fatalf("os.MkdirAll(%q) error = %v", appModule, err)
 	}
-	writeSemanticTestFile(t, filepath.Join(workspaceRoot, "go.work"), []byte("go 1.26\n\nuse (\n\t./contract\n\t./app\n)\n"))
-	writeSemanticTestFile(t, filepath.Join(contractModule, "go.mod"), []byte("module example.com/contract\n\ngo 1.26\n"))
+	writeSemanticTestFile(
+		t,
+		filepath.Join(workspaceRoot, "go.work"),
+		[]byte("go 1.26\n\nuse (\n\t./contract\n\t./app\n)\n"),
+	)
+	writeSemanticTestFile(
+		t,
+		filepath.Join(contractModule, "go.mod"),
+		[]byte("module example.com/contract\n\ngo 1.26\n"),
+	)
 	writeSemanticTestFile(t, filepath.Join(appModule, "go.mod"), []byte("module example.com/app\n\ngo 1.26\n"))
 	contractSource := []byte(`package contract
 
@@ -103,7 +111,7 @@ func Use() string { return contract.Welcome(Person{}) }
 
 	reader := bufio.NewReader(output)
 	_ = readTestFrame(t, reader)
-	responses := readSemanticTestResponsesByID(t, reader, 2)
+	responses := readSemanticTestResponsePairByID(t, reader)
 	contractLenses := semanticTestResponseLenses(t, responses[2])
 	appLenses := semanticTestResponseLenses(t, responses[3])
 
@@ -300,7 +308,7 @@ func (WrongStore) Get(key string) error { return nil }
 
 	reader := bufio.NewReader(output)
 	_ = readTestFrame(t, reader)
-	responses := readSemanticTestResponsesByID(t, reader, 2)
+	responses := readSemanticTestResponsePairByID(t, reader)
 	contractLenses := semanticTestResponseLenses(t, responses[2])
 	storeLenses := semanticTestResponseLenses(t, responses[3])
 
@@ -396,7 +404,7 @@ func (Person) UnusedMethod() {}
 
 	reader := bufio.NewReader(output)
 	_ = readTestFrame(t, reader)
-	responses := readSemanticTestResponsesByID(t, reader, 2)
+	responses := readSemanticTestResponsePairByID(t, reader)
 	contractLenses := semanticTestResponseLenses(t, responses[2])
 	implementationLenses := semanticTestResponseLenses(t, responses[3])
 
@@ -542,7 +550,7 @@ func (Person) Greet() string { return "hello" }
 
 	reader := bufio.NewReader(output)
 	_ = readTestFrame(t, reader)
-	responses := readSemanticTestResponsesByID(t, reader, 2)
+	responses := readSemanticTestResponsePairByID(t, reader)
 	for _, id := range []int{2, 3} {
 		lenses := semanticTestResponseLenses(t, responses[id])
 		zeroTypeImplementations := findSemanticTestLens(t, lenses, "0 implementations", 2)
@@ -702,10 +710,10 @@ func semanticTestResponseLenses(t *testing.T, response map[string]any) []any {
 	return lenses
 }
 
-func readSemanticTestResponsesByID(t *testing.T, reader io.Reader, count int) map[int]map[string]any {
+func readSemanticTestResponsePairByID(t *testing.T, reader io.Reader) map[int]map[string]any {
 	t.Helper()
-	responses := make(map[int]map[string]any, count)
-	for range count {
+	responses := make(map[int]map[string]any, 2)
+	for range 2 {
 		response := readTestFrame(t, reader)
 		id, ok := response["id"].(float64)
 		if !ok {

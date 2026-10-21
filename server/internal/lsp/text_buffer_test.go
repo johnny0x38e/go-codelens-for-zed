@@ -3,7 +3,7 @@ package lsp
 import (
 	"testing"
 
-	"github.com/johnny/go-codelens-for-zed/server/internal/analysis"
+	"github.com/johnny0x38e/go-codelens-for-zed/server/internal/analysis"
 )
 
 func TestTextBufferAppliesASCIIInsertAndDelete(t *testing.T) {
@@ -164,7 +164,10 @@ func TestTextBufferNoOpDoesNotReportChange(t *testing.T) {
 	assertTextBufferContent(t, buffer, "abc\n")
 }
 
-func textBufferRangeChange(startLine, startCharacter, endLine, endCharacter int, text string) textDocumentContentChangeEvent {
+func textBufferRangeChange(
+	startLine, startCharacter, endLine, endCharacter int,
+	text string,
+) textDocumentContentChangeEvent {
 	return textDocumentContentChangeEvent{
 		Range: &analysis.Range{
 			Start: analysis.Position{Line: startLine, Character: startCharacter},

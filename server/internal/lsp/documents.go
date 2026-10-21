@@ -6,7 +6,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/johnny/go-codelens-for-zed/server/internal/analysis"
+	"github.com/johnny0x38e/go-codelens-for-zed/server/internal/analysis"
 )
 
 // openDocument retains the editor's current buffer and lifecycle state.
@@ -43,7 +43,9 @@ func (s *documentStore) Open(uri, text string, version int64) (string, bool, err
 	content := []byte(text)
 	// This one lifecycle read determines whether analysis needs an overlay. The
 	// store performs no polling, background scans, or persistent writes.
-	diskContent, readErr := os.ReadFile(path) //nolint:gosec // LSP document URIs intentionally identify local workspace files.
+	diskContent, readErr := os.ReadFile(
+		path,
+	) //nolint:gosec // LSP document URIs intentionally identify local workspace files.
 	dirty := readErr != nil || !bytes.Equal(diskContent, content)
 
 	s.mu.Lock()
@@ -68,7 +70,11 @@ func (s *documentStore) Open(uri, text string, version int64) (string, bool, err
 	return path, changed, nil
 }
 
-func (s *documentStore) Change(uri string, version int64, changes []textDocumentContentChangeEvent) (string, bool, error) {
+func (s *documentStore) Change(
+	uri string,
+	version int64,
+	changes []textDocumentContentChangeEvent,
+) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	path, ok := s.pathsByURI[uri]
@@ -105,7 +111,9 @@ func (s *documentStore) Save(uri string) (string, bool) {
 	// Only a confirmed byte-for-byte disk match can retire the overlay. A failed
 	// or not-yet-visible save leaves the editor buffer authoritative while still
 	// invalidating analysis for the save event.
-	diskContent, readErr := os.ReadFile(path) //nolint:gosec // LSP document URIs intentionally identify local workspace files.
+	diskContent, readErr := os.ReadFile(
+		path,
+	) //nolint:gosec // LSP document URIs intentionally identify local workspace files.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	document := s.documents[path]

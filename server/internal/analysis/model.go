@@ -57,8 +57,11 @@ var emptySnapshotData = &snapshotData{
 }
 
 // Snapshot is an immutable set of semantic lenses grouped by document URI.
+// files retains the cheap on-disk identity recorded for each analysed file so
+// callers can detect external rewrites that never produced an LSP notification.
 type Snapshot struct {
-	data *snapshotData
+	data  *snapshotData
+	files map[string]fileIdentity
 }
 
 func newSnapshot(lensesByURI map[string][]Lens) Snapshot {

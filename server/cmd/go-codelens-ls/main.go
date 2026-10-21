@@ -9,7 +9,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/johnny/go-codelens-for-zed/server/internal/lsp"
+	"github.com/johnny0x38e/go-codelens-for-zed/server/internal/lsp"
 )
 
 func main() {
@@ -40,7 +40,11 @@ func openTrace() (io.Writer, func(), error) {
 		return nil, func() {}, nil
 	}
 
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // The user explicitly selects the trace destination.
+	file, err := os.OpenFile(
+		path,
+		os.O_CREATE|os.O_APPEND|os.O_WRONLY,
+		0o600,
+	) //nolint:gosec // The user explicitly selects the trace destination.
 	if err != nil {
 		return nil, nil, fmt.Errorf("open trace file: %w", err)
 	}

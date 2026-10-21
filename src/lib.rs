@@ -8,7 +8,7 @@ use std::{
 };
 use zed_extension_api::{self as zed, Result};
 
-const GITHUB_REPOSITORY: &str = "Johnny0x38E/go-codelens-for-zed";
+const GITHUB_REPOSITORY: &str = "johnny0x38e/go-codelens-for-zed";
 const SERVER_NAME: &str = "go-codelens-ls";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CHECKSUMS_ASSET: &str = "SHA256SUMS";

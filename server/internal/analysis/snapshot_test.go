@@ -6,14 +6,14 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/johnny/go-codelens-for-zed/server/internal/testutil"
+	"github.com/johnny0x38e/go-codelens-for-zed/server/internal/testutil"
 )
 
 func TestApplyLensChangesCopiesOnlyTouchedURIs(t *testing.T) {
 	t.Parallel()
 
-	firstID := newSymbolID("example.com/snapshot", "", "First", symbolFunction, 0)
-	secondID := newSymbolID("example.com/snapshot", "", "Second", symbolFunction, 0)
+	firstID := newSymbolID("example.com/snapshot", "", "First", symbolFunction)
+	secondID := newSymbolID("example.com/snapshot", "", "Second", symbolFunction)
 	firstDeclaration := benchmarkLocation("first-declaration", 0)
 	secondDeclaration := benchmarkLocation("second-declaration", 0)
 	firstOldUse := benchmarkLocation("first-use", 1)

@@ -26,7 +26,11 @@ func TestRelationshipIndexMatchesFullSnapshotAcrossPackageReplacement(t *testing
 	got := snapshotFromIndexes(facts, relationships)
 	want := snapshotFromFacts(factsByPackage)
 	if !reflect.DeepEqual(got.lensMap(), want.lensMap()) {
-		t.Fatalf("initial indexed Snapshot differs from full Snapshot\ngot:  %#v\nwant: %#v", got.lensMap(), want.lensMap())
+		t.Fatalf(
+			"initial indexed Snapshot differs from full Snapshot\ngot:  %#v\nwant: %#v",
+			got.lensMap(),
+			want.lensMap(),
+		)
 	}
 
 	replacement := indexedConcretePackageFacts(namedTypes[:5])
@@ -43,7 +47,11 @@ func TestRelationshipIndexMatchesFullSnapshotAcrossPackageReplacement(t *testing
 		replacement.packageID:    replacement,
 	})
 	if !reflect.DeepEqual(got.lensMap(), want.lensMap()) {
-		t.Fatalf("updated indexed Snapshot differs from full Snapshot\ngot:  %#v\nwant: %#v", got.lensMap(), want.lensMap())
+		t.Fatalf(
+			"updated indexed Snapshot differs from full Snapshot\ngot:  %#v\nwant: %#v",
+			got.lensMap(),
+			want.lensMap(),
+		)
 	}
 }
 
@@ -104,22 +112,30 @@ var _ contracts.ReaderAlias = Worker{}
 var _ contracts.ReadWriter = (*Worker)(nil)
 var _ localPrivate = hiddenWorker{}
 `)
-	writeAnalysisTestFile(t, filepath.Join(moduleDir, "implementation", "implementation_test.go"), `package implementation
+	writeAnalysisTestFile(
+		t,
+		filepath.Join(moduleDir, "implementation", "implementation_test.go"),
+		`package implementation
 
 import "example.com/indexed-complex/contracts"
 
 type internalWorker struct{}
 
 func (internalWorker) Read(value contracts.Box[int]) int { return value.Value }
-`)
-	writeAnalysisTestFile(t, filepath.Join(moduleDir, "implementation", "external_test.go"), `package implementation_test
+`,
+	)
+	writeAnalysisTestFile(
+		t,
+		filepath.Join(moduleDir, "implementation", "external_test.go"),
+		`package implementation_test
 
 import "example.com/indexed-complex/contracts"
 
 type externalWorker struct{}
 
 func (externalWorker) Read(value contracts.Box[int]) int { return value.Value }
-`)
+`,
+	)
 
 	full, err := analyzeScope(context.Background(), ModuleAnalysisScope(moduleDir), nil, false)
 	if err != nil {
@@ -149,7 +165,7 @@ func indexedInterfacePackageFacts(interfaces []interfaceFact) *packageFacts {
 	}
 	for index := range facts.interfaces {
 		declaration := &facts.interfaces[index]
-		declaration.id = newSymbolID(facts.packagePath, "", declaration.name, symbolType, 0)
+		declaration.id = newSymbolID(facts.packagePath, "", declaration.name, symbolType)
 		facts.declarations = append(facts.declarations, declarationFact{
 			id:       declaration.id,
 			location: declaration.location,
@@ -157,7 +173,7 @@ func indexedInterfacePackageFacts(interfaces []interfaceFact) *packageFacts {
 		for methodIndex := range declaration.interfaceType.NumExplicitMethods() {
 			function := declaration.interfaceType.ExplicitMethod(methodIndex)
 			method := newMethodFact(
-				newSymbolID(facts.packagePath, "type:"+declaration.name, function.Name(), symbolMethod, 0),
+				newSymbolID(facts.packagePath, "type:"+declaration.name, function.Name(), symbolMethod),
 				function,
 				benchmarkLocation("interface-method", index*10+methodIndex),
 			)
@@ -179,7 +195,7 @@ func indexedConcretePackageFacts(namedTypes []namedTypeFact) *packageFacts {
 	}
 	for index := range facts.namedTypes {
 		declaration := &facts.namedTypes[index]
-		declaration.id = newSymbolID(facts.packagePath, "", declaration.name, symbolType, 0)
+		declaration.id = newSymbolID(facts.packagePath, "", declaration.name, symbolType)
 		facts.declarations = append(facts.declarations, declarationFact{
 			id:       declaration.id,
 			location: declaration.location,
@@ -192,7 +208,6 @@ func indexedConcretePackageFacts(namedTypes []namedTypeFact) *packageFacts {
 					"type:"+declaration.name,
 					function.Name(),
 					symbolMethod,
-					0,
 				),
 				function,
 				benchmarkLocation("concrete-method", index*10+methodIndex),

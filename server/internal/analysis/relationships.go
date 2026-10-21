@@ -126,7 +126,7 @@ func newRelationshipIndex(facts *factIndex) *relationshipIndex {
 		interfaceMethodTargets:           make(map[Location][]Location, len(facts.interfaceMethods)),
 		concreteMethodInterfaces:         make(map[Location][]namedRelationship, len(facts.concreteMethods)),
 	}
-	interfaceKeys := mapKeys(facts.interfaces)
+	interfaceKeys := slices.AppendSeq(make([]ownedSymbolID, 0, len(facts.interfaces)), maps.Keys(facts.interfaces))
 	sortOwnedSymbolIDs(interfaceKeys)
 	for _, interfaceKey := range interfaceKeys {
 		typeKeys := implementationCandidates(facts, interfaceKey)
@@ -138,7 +138,10 @@ func newRelationshipIndex(facts *factIndex) *relationshipIndex {
 			index.interfacesByType[typeKey] = append(index.interfacesByType[typeKey], interfaceKey)
 		}
 	}
-	methodKeys := mapKeys(facts.interfaceMethods)
+	methodKeys := slices.AppendSeq(
+		make([]ownedSymbolID, 0, len(facts.interfaceMethods)),
+		maps.Keys(facts.interfaceMethods),
+	)
 	sortOwnedSymbolIDs(methodKeys)
 	for _, methodKey := range methodKeys {
 		concreteKeys := methodImplementationCandidates(facts, methodKey)
@@ -269,10 +272,14 @@ func methodImplementationCandidates(facts *factIndex, methodKey ownedSymbolID) [
 	return slices.Compact(result)
 }
 
-func (i *relationshipIndex) updateImplementationRows(oldFacts, newFacts *factIndex, affected map[ownedSymbolID]struct{}, changes *factChanges) {
+func (i *relationshipIndex) updateImplementationRows(
+	oldFacts, newFacts *factIndex,
+	affected map[ownedSymbolID]struct{},
+	changes *factChanges,
+) {
 	interfaceLocations := make(map[Location]struct{})
 	typeLocations := make(map[Location]struct{})
-	keys := mapKeys(affected)
+	keys := slices.AppendSeq(make([]ownedSymbolID, 0, len(affected)), maps.Keys(affected))
 	sortOwnedSymbolIDs(keys)
 	for _, interfaceKey := range keys {
 		changes.addLens(interfaceKey.symbolID, LensKindImplementations)
@@ -297,7 +304,7 @@ func (i *relationshipIndex) updateImplementationRows(oldFacts, newFacts *factInd
 				typeLocations[declaration.location] = struct{}{}
 			}
 		}
-		i.replaceImplementationRow(interfaceKey, oldTypes, newTypes)
+		replaceRelationshipRow(i.typesByInterface, i.interfacesByType, interfaceKey, newTypes)
 	}
 	for location := range interfaceLocations {
 		i.rebuildInterfaceTargets(newFacts, location)
@@ -307,43 +314,14 @@ func (i *relationshipIndex) updateImplementationRows(oldFacts, newFacts *factInd
 	}
 }
 
-func (i *relationshipIndex) replaceImplementationRow(interfaceKey ownedSymbolID, oldTypes, newTypes []ownedSymbolID) {
-	// Update both directions in one operation. Keeping these maps symmetric is
-	// required by the location materializers and is cheaper than rebuilding the
-	// global inverse relation after every package edit.
-	if len(newTypes) == 0 {
-		delete(i.typesByInterface, interfaceKey)
-	} else {
-		i.typesByInterface[interfaceKey] = newTypes
-	}
-	changedTypes := append(slices.Clone(oldTypes), newTypes...)
-	sortOwnedSymbolIDs(changedTypes)
-	changedTypes = slices.Compact(changedTypes)
-	for _, typeKey := range changedTypes {
-		current := i.interfacesByType[typeKey]
-		next := make([]ownedSymbolID, 0, len(current)+1)
-		for _, candidate := range current {
-			if candidate != interfaceKey {
-				next = append(next, candidate)
-			}
-		}
-		if slices.Contains(newTypes, typeKey) {
-			next = append(next, interfaceKey)
-		}
-		sortOwnedSymbolIDs(next)
-		next = slices.Compact(next)
-		if len(next) == 0 {
-			delete(i.interfacesByType, typeKey)
-		} else {
-			i.interfacesByType[typeKey] = next
-		}
-	}
-}
-
-func (i *relationshipIndex) updateMethodRows(oldFacts, newFacts *factIndex, affected map[ownedSymbolID]struct{}, changes *factChanges) {
+func (i *relationshipIndex) updateMethodRows(
+	oldFacts, newFacts *factIndex,
+	affected map[ownedSymbolID]struct{},
+	changes *factChanges,
+) {
 	interfaceLocations := make(map[Location]struct{})
 	concreteLocations := make(map[Location]struct{})
-	keys := mapKeys(affected)
+	keys := slices.AppendSeq(make([]ownedSymbolID, 0, len(affected)), maps.Keys(affected))
 	sortOwnedSymbolIDs(keys)
 	for _, methodKey := range keys {
 		changes.addLens(methodKey.symbolID, LensKindImplementations)
@@ -368,7 +346,12 @@ func (i *relationshipIndex) updateMethodRows(oldFacts, newFacts *factIndex, affe
 				concreteLocations[declaration.location] = struct{}{}
 			}
 		}
-		i.replaceMethodRow(methodKey, oldConcrete, newConcrete)
+		replaceRelationshipRow(
+			i.concreteMethodsByInterfaceMethod,
+			i.interfaceMethodsByConcreteMethod,
+			methodKey,
+			newConcrete,
+		)
 	}
 	for location := range interfaceLocations {
 		i.rebuildInterfaceMethodTargets(newFacts, location)
@@ -378,34 +361,38 @@ func (i *relationshipIndex) updateMethodRows(oldFacts, newFacts *factIndex, affe
 	}
 }
 
-func (i *relationshipIndex) replaceMethodRow(methodKey ownedSymbolID, oldConcrete, newConcrete []ownedSymbolID) {
-	// Maintain the forward and reverse method edges atomically within the new,
-	// unpublished index revision.
-	if len(newConcrete) == 0 {
-		delete(i.concreteMethodsByInterfaceMethod, methodKey)
+// replaceRelationshipRow keeps forward and reverse edges symmetric. The maps
+// belong to the unpublished revision; reverse slices must be rebuilt because
+// their backing arrays may still be shared with a published index.
+func replaceRelationshipRow(
+	forward, reverse map[ownedSymbolID][]ownedSymbolID,
+	key ownedSymbolID,
+	targets []ownedSymbolID,
+) {
+	previous := forward[key]
+	if len(targets) == 0 {
+		delete(forward, key)
 	} else {
-		i.concreteMethodsByInterfaceMethod[methodKey] = newConcrete
+		forward[key] = targets
 	}
-	changedConcrete := append(slices.Clone(oldConcrete), newConcrete...)
-	sortOwnedSymbolIDs(changedConcrete)
-	changedConcrete = slices.Compact(changedConcrete)
-	for _, concreteKey := range changedConcrete {
-		current := i.interfaceMethodsByConcreteMethod[concreteKey]
+	changed := append(slices.Clone(previous), targets...)
+	sortOwnedSymbolIDs(changed)
+	for _, target := range slices.Compact(changed) {
+		current := reverse[target]
 		next := make([]ownedSymbolID, 0, len(current)+1)
 		for _, candidate := range current {
-			if candidate != methodKey {
+			if candidate != key {
 				next = append(next, candidate)
 			}
 		}
-		if slices.Contains(newConcrete, concreteKey) {
-			next = append(next, methodKey)
+		if slices.Contains(targets, target) {
+			next = append(next, key)
 		}
 		sortOwnedSymbolIDs(next)
-		next = slices.Compact(next)
 		if len(next) == 0 {
-			delete(i.interfaceMethodsByConcreteMethod, concreteKey)
+			delete(reverse, target)
 		} else {
-			i.interfaceMethodsByConcreteMethod[concreteKey] = next
+			reverse[target] = slices.Compact(next)
 		}
 	}
 }
@@ -492,12 +479,4 @@ func (i *relationshipIndex) rebuildConcreteMethodInterfaces(facts *factIndex, lo
 		return
 	}
 	i.concreteMethodInterfaces[location] = uniqueSortedRelationships(relationships)
-}
-
-func mapKeys[K comparable, V any](values map[K]V) []K {
-	result := make([]K, 0, len(values))
-	for key := range values {
-		result = append(result, key)
-	}
-	return result
 }

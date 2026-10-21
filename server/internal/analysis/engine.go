@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"maps"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -97,8 +98,8 @@ func (*incrementalFallbackError) Unwrap() error {
 }
 
 func fallbackReasonFromError(err error) (fallbackReason, bool) {
-	var fallback *incrementalFallbackError
-	if !errors.As(err, &fallback) {
+	fallback, ok := errors.AsType[*incrementalFallbackError](err)
+	if !ok {
 		return fallbackNone, false
 	}
 	return fallback.reason, true
@@ -141,15 +142,9 @@ func NewChangeSet(changes ...Change) ChangeSet {
 		byPath[change.Path] = change
 	}
 
-	canonical := make([]Change, 0, len(byPath))
-	for _, change := range byPath {
-		canonical = append(canonical, change)
-	}
+	canonical := slices.AppendSeq(make([]Change, 0, len(byPath)), maps.Values(byPath))
 	slices.SortFunc(canonical, func(left, right Change) int {
-		if left.Path != right.Path {
-			return cmp.Compare(left.Path, right.Path)
-		}
-		return cmp.Compare(left.Kind, right.Kind)
+		return cmp.Compare(left.Path, right.Path)
 	})
 	return canonicalChangeSet(canonical)
 }
@@ -294,7 +289,12 @@ func NewEngine() *Engine {
 // Analyze returns a cached unchanged snapshot when possible and incrementally
 // rechecks known content edits. Any edit that cannot be proven safe performs
 // one complete analysis and replaces the retained immutable state.
-func (e *Engine) Analyze(ctx context.Context, scope AnalysisScope, changes ChangeSet, overlays map[string][]byte) (Snapshot, error) {
+func (e *Engine) Analyze(
+	ctx context.Context,
+	scope AnalysisScope,
+	changes ChangeSet,
+	overlays map[string][]byte,
+) (Snapshot, error) {
 	cacheKey := scope.CacheKey()
 	emptyChanges := changes.Empty()
 	e.mu.RLock()
@@ -338,6 +338,7 @@ func (e *Engine) Analyze(ctx context.Context, scope AnalysisScope, changes Chang
 					),
 					index: index,
 				}
+				attachFileIdentities(&result)
 				e.publish(cacheKey, control, scope, result)
 				return result.snapshot, nil
 			}
@@ -364,8 +365,19 @@ func (e *Engine) Analyze(ctx context.Context, scope AnalysisScope, changes Chang
 		return Snapshot{}, err
 	}
 
+	attachFileIdentities(&result)
 	e.publish(cacheKey, control, scope, result)
 	return result.snapshot, nil
+}
+
+// attachFileIdentities binds the identity map of the analysis revision to the
+// snapshot returned to callers. Rechecking refreshes identities only for the
+// affected compiled files, so unchanged entries stay shared.
+func attachFileIdentities(result *scopeAnalysis) {
+	if result.index == nil {
+		return
+	}
+	result.snapshot = result.snapshot.withFileIdentities(result.index.fileIdentities)
 }
 
 func (e *Engine) beginAnalysis(

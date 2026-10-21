@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johnny/go-codelens-for-zed/server/internal/analysis"
+	"github.com/johnny0x38e/go-codelens-for-zed/server/internal/analysis"
 )
 
 func TestServeInitialize(t *testing.T) {

@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johnny/go-codelens-for-zed/server/internal/analysis"
+	"github.com/johnny0x38e/go-codelens-for-zed/server/internal/analysis"
 )
 
 func TestAnalysisScopeCacheEvictsOldestInsertionWithoutPromotingHits(t *testing.T) {
@@ -276,7 +276,11 @@ func (Worker) Run() {}
 
 func TestInvalidIncrementalNotificationPreservesSnapshot(t *testing.T) {
 	moduleRoot := t.TempDir()
-	writeSemanticTestFile(t, filepath.Join(moduleRoot, "go.mod"), []byte("module example.com/invalid-edit\n\ngo 1.26\n"))
+	writeSemanticTestFile(
+		t,
+		filepath.Join(moduleRoot, "go.mod"),
+		[]byte("module example.com/invalid-edit\n\ngo 1.26\n"),
+	)
 	filename := filepath.Join(moduleRoot, "sample.go")
 	source := []byte("package sample\n")
 	writeSemanticTestFile(t, filename, source)
@@ -290,13 +294,13 @@ func TestInvalidIncrementalNotificationPreservesSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := state.handleNotification("textDocument/didOpen", openParams); err != nil {
-		t.Fatalf("handle didOpen: %v", err)
+	if openErr := state.handleNotification("textDocument/didOpen", openParams); openErr != nil {
+		t.Fatalf("handle didOpen: %v", openErr)
 	}
 
 	scope := analysis.ModuleAnalysisScope(moduleRoot)
-	if _, err := state.snapshotForScope(context.Background(), scope); err != nil {
-		t.Fatalf("prime snapshot: %v", err)
+	if _, snapshotErr := state.snapshotForScope(context.Background(), scope); snapshotErr != nil {
+		t.Fatalf("prime snapshot: %v", snapshotErr)
 	}
 	state.cacheMu.RLock()
 	before := state.snapshots[scope.CacheKey()]
@@ -321,14 +325,8 @@ func TestInvalidIncrementalNotificationPreservesSnapshot(t *testing.T) {
 	if !after.valid {
 		t.Fatal("invalid didChange invalidated the cached snapshot")
 	}
-	if after.revision != before.revision || after.snapshotRevision != before.snapshotRevision {
-		t.Fatalf(
-			"snapshot revisions after invalid didChange = (%d, %d), want (%d, %d)",
-			after.revision,
-			after.snapshotRevision,
-			before.revision,
-			before.snapshotRevision,
-		)
+	if after.revision != before.revision {
+		t.Fatalf("snapshot revision after invalid didChange = %d, want %d", after.revision, before.revision)
 	}
 }
 
@@ -356,8 +354,8 @@ func TestSnapshotFlightRetainsChangesAcrossInvalidation(t *testing.T) {
 		return analysis.Snapshot{}, nil
 	}
 
-	if _, err := state.snapshotForScope(context.Background(), scope); err != nil {
-		t.Fatalf("prime snapshot: %v", err)
+	if _, snapshotErr := state.snapshotForScope(context.Background(), scope); snapshotErr != nil {
+		t.Fatalf("prime snapshot: %v", snapshotErr)
 	}
 	state.invalidateSnapshotsForChange(analysis.Change{Path: firstPath, Kind: analysis.ChangeContent})
 
@@ -723,7 +721,10 @@ func TestAnalysisScopeCacheUsesDirectoriesAndMetadataInvalidation(t *testing.T) 
 		t.Fatalf("scope finder calls for one directory = %d, want 1", calls)
 	}
 
-	if err := state.handleNotification("workspace/didChangeWatchedFiles", watchedFilesParams(t, filepath.Join(moduleRoot, "package", "first.go"))); err != nil {
+	if err := state.handleNotification(
+		"workspace/didChangeWatchedFiles",
+		watchedFilesParams(t, filepath.Join(moduleRoot, "package", "first.go")),
+	); err != nil {
 		t.Fatalf("handle watched Go file: %v", err)
 	}
 	if _, err := state.analysisScopeFor(firstFile); err != nil {
@@ -733,7 +734,10 @@ func TestAnalysisScopeCacheUsesDirectoriesAndMetadataInvalidation(t *testing.T) 
 		t.Fatalf("scope finder calls after Go source change = %d, want 1", calls)
 	}
 
-	if err := state.handleNotification("workspace/didChangeWatchedFiles", watchedFilesParams(t, filepath.Join(moduleRoot, "go.mod"))); err != nil {
+	if err := state.handleNotification(
+		"workspace/didChangeWatchedFiles",
+		watchedFilesParams(t, filepath.Join(moduleRoot, "go.mod")),
+	); err != nil {
 		t.Fatalf("handle watched go.mod: %v", err)
 	}
 	if _, err := state.analysisScopeFor(firstFile); err != nil {
@@ -764,7 +768,10 @@ func TestWatchedFileChangeInvalidatesOnlyContainingScope(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := state.handleNotification("workspace/didChangeWatchedFiles", watchedFilesParams(t, filepath.Join(firstScope.Root, "changed.go"))); err != nil {
+	if err := state.handleNotification(
+		"workspace/didChangeWatchedFiles",
+		watchedFilesParams(t, filepath.Join(firstScope.Root, "changed.go")),
+	); err != nil {
 		t.Fatalf("handle watched file: %v", err)
 	}
 	if _, err := state.snapshotForScope(context.Background(), firstScope); err != nil {

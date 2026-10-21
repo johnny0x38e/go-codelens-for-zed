@@ -60,10 +60,12 @@ func (c *factChanges) addLens(id symbolID, kind LensKind) {
 }
 
 func (c *factChanges) sortedLensKeys() []lensKey {
-	keys := mapKeys(c.lenses)
+	// Retain exact capacity on revision hot paths; iterator growth would add
+	// temporary allocations even though the final key count is already known.
+	keys := slices.AppendSeq(make([]lensKey, 0, len(c.lenses)), maps.Keys(c.lenses))
 	slices.SortFunc(keys, func(left, right lensKey) int {
 		if left.declaration != right.declaration {
-			return compareSymbolIDs(left.declaration, right.declaration)
+			return cmp.Compare(left.declaration, right.declaration)
 		}
 		return cmp.Compare(left.kind, right.kind)
 	})
@@ -113,10 +115,7 @@ type factIndexCapacities struct {
 
 func newFactIndex(factsByPackage map[string]*packageFacts) *factIndex {
 	index := emptyFactIndex(factIndexCapacitiesFor(factsByPackage))
-	packageIDs := make([]string, 0, len(factsByPackage))
-	for packageID := range factsByPackage {
-		packageIDs = append(packageIDs, packageID)
-	}
+	packageIDs := slices.AppendSeq(make([]string, 0, len(factsByPackage)), maps.Keys(factsByPackage))
 	slices.Sort(packageIDs)
 	for _, packageID := range packageIDs {
 		facts := factsByPackage[packageID]
@@ -185,10 +184,7 @@ func (i *factIndex) withPackageFacts(replacements map[string]*packageFacts) (*fa
 	var declarationLensCandidates map[symbolID]struct{}
 	var referenceLensCandidates map[symbolID]struct{}
 
-	packageIDs := make([]string, 0, len(replacements))
-	for packageID := range replacements {
-		packageIDs = append(packageIDs, packageID)
-	}
+	packageIDs := slices.AppendSeq(make([]string, 0, len(replacements)), maps.Keys(replacements))
 	slices.Sort(packageIDs)
 
 	var declarationsChanged, directUsesChanged, methodUsesChanged bool
@@ -325,7 +321,10 @@ func (i *factIndex) addAllPackageContributions(facts *packageFacts) {
 	packageID := facts.packageID
 	for index := range facts.declarations {
 		fact := &facts.declarations[index]
-		i.declarationBuckets[fact.id] = append(i.declarationBuckets[fact.id], ownedFact[declarationFact]{packageID, fact})
+		i.declarationBuckets[fact.id] = append(
+			i.declarationBuckets[fact.id],
+			ownedFact[declarationFact]{packageID, fact},
+		)
 	}
 	for index := range facts.directUses {
 		fact := &facts.directUses[index]
@@ -334,7 +333,10 @@ func (i *factIndex) addAllPackageContributions(facts *packageFacts) {
 	for index := range facts.methodUses {
 		fact := &facts.methodUses[index]
 		for _, targetID := range fact.matchedMethods {
-			i.methodUseBuckets[targetID] = append(i.methodUseBuckets[targetID], ownedFact[methodUseFact]{packageID, fact})
+			i.methodUseBuckets[targetID] = append(
+				i.methodUseBuckets[targetID],
+				ownedFact[methodUseFact]{packageID, fact},
+			)
 		}
 	}
 	for index := range facts.namedTypes {
@@ -359,8 +361,14 @@ func (i *factIndex) addAllPackageContributions(facts *packageFacts) {
 			method := &fact.methods[methodIndex]
 			methodKey := ownedSymbolID{packageID, method.id}
 			i.interfaceMethods[methodKey] = interfaceMethodFact{method, fact.name}
-			i.interfaceMethodsByLocation[method.location] = append(i.interfaceMethodsByLocation[method.location], methodKey)
-			i.interfaceMethodsByIdentity[method.identity] = append(i.interfaceMethodsByIdentity[method.identity], methodKey)
+			i.interfaceMethodsByLocation[method.location] = append(
+				i.interfaceMethodsByLocation[method.location],
+				methodKey,
+			)
+			i.interfaceMethodsByIdentity[method.identity] = append(
+				i.interfaceMethodsByIdentity[method.identity],
+				methodKey,
+			)
 		}
 	}
 	for index := range facts.declaredMethods {
@@ -497,7 +505,11 @@ func (i *factIndex) cloneConcreteMethodMaps(previous *factIndex) {
 	i.concreteMethodsByIdentity = maps.Clone(previous.concreteMethodsByIdentity)
 }
 
-func (i *factIndex) replaceNamedTypeContributions(packageID string, oldFacts, newFacts *packageFacts, changes *factChanges) {
+func (i *factIndex) replaceNamedTypeContributions(
+	packageID string,
+	oldFacts, newFacts *packageFacts,
+	changes *factChanges,
+) {
 	oldKeys := namedTypeKeys(oldFacts)
 	for _, key := range oldKeys {
 		addOwnedSymbolID(&changes.namedTypes, key)
@@ -526,7 +538,11 @@ func (i *factIndex) replaceNamedTypeContributions(packageID string, oldFacts, ne
 	}
 }
 
-func (i *factIndex) replaceInterfaceContributions(packageID string, oldFacts, newFacts *packageFacts, changes *factChanges) {
+func (i *factIndex) replaceInterfaceContributions(
+	packageID string,
+	oldFacts, newFacts *packageFacts,
+	changes *factChanges,
+) {
 	for _, key := range interfaceKeys(oldFacts) {
 		addOwnedSymbolID(&changes.interfaces, key)
 		delete(i.interfaces, key)
@@ -573,7 +589,11 @@ func (i *factIndex) replaceInterfaceContributions(packageID string, oldFacts, ne
 	)
 }
 
-func (i *factIndex) replaceConcreteMethodContributions(packageID string, oldFacts, newFacts *packageFacts, changes *factChanges) {
+func (i *factIndex) replaceConcreteMethodContributions(
+	packageID string,
+	oldFacts, newFacts *packageFacts,
+	changes *factChanges,
+) {
 	for _, key := range concreteMethodKeys(oldFacts) {
 		addOwnedSymbolID(&changes.concreteMethods, key)
 		delete(i.concreteMethods, key)
@@ -710,7 +730,7 @@ func sortOwnedSymbolIDs(values []ownedSymbolID) {
 		if left.packageID != right.packageID {
 			return cmp.Compare(left.packageID, right.packageID)
 		}
-		return compareSymbolIDs(left.symbolID, right.symbolID)
+		return cmp.Compare(left.symbolID, right.symbolID)
 	})
 }
 

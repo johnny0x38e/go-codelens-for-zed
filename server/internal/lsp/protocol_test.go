@@ -18,7 +18,8 @@ func TestInitializeParamsDecode(t *testing.T) {
 	if len(params.WorkspaceFolders) != 2 {
 		t.Fatalf("len(WorkspaceFolders) = %d, want 2", len(params.WorkspaceFolders))
 	}
-	if params.WorkspaceFolders[0].URI != "file:///workspace/one" || params.WorkspaceFolders[1].URI != "file:///workspace/two" {
+	if params.WorkspaceFolders[0].URI != "file:///workspace/one" ||
+		params.WorkspaceFolders[1].URI != "file:///workspace/two" {
 		t.Fatalf("WorkspaceFolders = %#v, want both workspace URIs", params.WorkspaceFolders)
 	}
 }

@@ -10,7 +10,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
-	"github.com/johnny/go-codelens-for-zed/server/internal/analysis"
+	"github.com/johnny0x38e/go-codelens-for-zed/server/internal/analysis"
 )
 
 const (
@@ -428,12 +428,5 @@ func (i textBufferInsertion) copyTo(destination []byte) {
 }
 
 func gapSlack(logicalLength int) int {
-	slack := logicalLength / 16
-	if slack < minimumGapSlack {
-		return minimumGapSlack
-	}
-	if slack > maximumGapSlack {
-		return maximumGapSlack
-	}
-	return slack
+	return min(max(logicalLength/16, minimumGapSlack), maximumGapSlack)
 }

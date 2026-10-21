@@ -2,124 +2,105 @@
 
 [English](README.md) | **简体中文**
 
-在 Zed 中以 CodeLens 形式精确展示 Go 引用与接口实现关系。
+在 Zed 中以 CodeLens 形式显示 Go 引用与接口实现关系。CodeLens 是显示在代码上方的一行可点击小字。
 
-## 为什么开发这个项目
+Go 接口采用隐式实现，因此接口不会列出实现它的类型，具体类型也不会说明自己实现了哪些接口。`gopls` 仍是 Go 的主要语言服务器，但不提供这种关系视图。Go CodeLens 作为独立的辅助语言服务器与 `gopls` 同时运行，只补充引用和实现关系；补全、诊断、格式化、重命名等编辑功能仍由 `gopls` 负责。
 
-Go 接口采用隐式实现，这让语言保持了很高的灵活性，但也让一类重要关系在声明处不可见：接口不会列出实现它的类型，具体类型也不会声明自己满足了哪些接口。无论是日常阅读、跳转还是代码审查，能够直接看到这些关系都非常有价值。
-
-`gopls` 仍然是 Go 最合适的主语言服务器，但它目前没有提供本项目所需要的这种关系型 CodeLens 视图。因此，Go CodeLens 作为一个专注的辅助语言服务器与 `gopls` 并行运行：它只补充引用与实现关系透镜，不代理、替代或干扰正常的 Go 开发能力。
-
-本项目的灵感来自 [Anirudh Agarwal](https://github.com/anirudhagarwal365) 开发的 Visual Studio Code 扩展 [Go Implementation Lens](https://github.com/anirudhagarwal365/go-implementation-lens)。该扩展的使用方式和展示效果充分证明了这些信息的价值。本仓库是面向 Zed 的独立实现，以 Go 类型系统为核心，并进一步针对结果精确性、增量分析、低内存分配和最小化磁盘 I/O 进行了专项优化。
-
-## 截图
+本项目受 [Anirudh Agarwal](https://github.com/anirudhagarwal365) 开发的 Visual Studio Code 扩展 [Go Implementation Lens](https://github.com/anirudhagarwal365/go-implementation-lens) 启发。本仓库是面向 Zed 的独立实现，基于 Go 的类型系统。
 
 <img src="assets/screenshot.png" alt="CodeLens">
 
 ## 功能
 
 - 在接口、函数和方法上显示 `0 references`、`1 reference` 或 `N references`。
-- 在已使用的命名类型、包级变量、常量、命名结构体字段和类型参数上显示引用数量；为了降低干扰，这些类别中未使用的声明不会显示透镜。
-- 在命名接口和显式接口方法上显示 `N implementations`，并提供精确的导航目标。
-- 在命名类型上显示 `Implements: Interface`，在接收者方法上显示 `Implements: Interface.Method`；一个声明满足多个关系时会合并展示。
-- 完整支持内部和外部 `_test.go` 包变体。
-- 通过最近且适用的 `go.work` 进行多模块分析；普通单模块项目不需要工作文件。
-- 通过 LSP 增量文档同步立即分析尚未保存的修改。
+- 在已使用的命名类型、包级变量、常量、命名结构体字段和类型参数上显示引用数量；这些类别中未使用的声明不显示 CodeLens。
+- 在命名接口和显式接口方法上显示 `N implementations`，并提供准确的跳转位置。
+- 在命名类型上显示 `Implements: Interface`，在接收者方法上显示 `Implements: Interface.Method`；一个声明实现多个接口时会一起显示。
+- 支持内部和外部 `_test.go` 测试包。
+- 通过最近的 `go.work` 文件（Go 的工作区文件）分析多模块项目；单模块项目不需要工作文件。
+- 通过编辑器发送的增量修改，立即分析尚未保存的内容。
 
-完整接口关系由 `go/types.Implements` 判定，包含指针方法集和提升方法。方法关系先通过带包语义的 Go 方法标识缩小范围，再要求签名满足 `types.Identical`。引用统计同样基于语义：它关联 `go/types.Info.Defs` 与 `go/types.Info.Uses`，排除声明自身的位置，合并普通包和测试变体的重复源码位置，也不会因为名称相同而误计无关符号。
+接口关系由 `go/types.Implements` 判定，包括指针接收者和提升方法。方法关系要求包、名称和 `types.Identical` 签名一致。引用数量来自 `go/types.Info.Defs` 和 `go/types.Info.Uses`：排除声明位置，合并普通包与测试包中的重复位置，并忽略名称相同但无关的符号。
 
-## 项目架构
+## 实现方式
 
 ```text
-Zed Editor
-├── gopls                         Go 语言主功能
-└── Go CodeLens extension
-    ├── src/lib.rs                轻量 Rust/Wasm Zed 适配层
-    └── go-codelens-ls            原生、无 cgo 的 Go LSP Sidecar
-        ├── internal/lsp          JSON-RPC、文档同步、缓存、取消
-        └── internal/analysis     作用域、类型事实、索引、关系计算
-            └── go/packages + go/ast + go/types
+Zed
+├── gopls                    Go 主语言服务器
+└── Go CodeLens 扩展
+    ├── src/lib.rs           Rust/WebAssembly 适配层
+    └── go-codelens-ls       辅助 CodeLens 语言服务器（独立进程）
 ```
 
-适配层会先在工作树 `PATH` 中查找 `go-codelens-ls`，方便本地开发覆盖；若未找到，则选择版本完全匹配的 GitHub Release 资源，通过 `SHA256SUMS` 校验后，把原生二进制缓存到 Zed 管理的扩展工作目录。Sidecar 随后负责确定适用的模块或 `go.work` 作用域，加载一致的 Go 类型宇宙，提取紧凑的语义事实，并返回标准 LSP CodeLens 命令。保持 Sidecar 独立后，补全、诊断、格式化、重命名等 Go 编辑体验仍完全由 `gopls` 负责。
+适配层先在项目的 `PATH` 环境变量中查找 `go-codelens-ls`；找不到时，下载版本匹配的 GitHub Release 文件，用 `SHA256SUMS` 校验后缓存到 Zed 的扩展工作目录。CodeLens 服务器随后找到模块或 `go.work` 工作区，加载一套一致的类型信息，并通过 Language Server Protocol（LSP）返回标准 CodeLens 结果。服务器入口是 `server/cmd/go-codelens-ls`，实现包位于 `server/internal`。
 
-Go 入口遵循惯用的 `server/cmd/go-codelens-ls` 布局；实现包保留在 `server/internal` 下，因为它们不是对外承诺的 Go 公共 API。
+- **结果准确：** 所有关系由 `go/types` 校验；名称索引只用于缩小候选范围。
+- **增量分析：** 函数体修改后重新检查拥有该文件的包，API 修改后重新检查依赖它的包，结构或模块变化回退到完整的 `packages.Load`。
+- **只读结果：** 更新时只复制变化的数据，读取者共享未变化的 map、slice 和跳转目标；过期结果不会返回。
+- **快速编辑：** UTF-8 文本缓冲区和行首索引应用 UTF-16 修改，无需重建整份文档。
+- **受控的并发与缓存：** 同一文档版本的请求共享一次分析，无人等待的任务会取消，模块和结果缓存有固定上限。
+- **减少磁盘读写：** 只读取打开或修改的文档，以及精确的编译源码路径；默认不写日志、索引或持久缓存。`GO_CODELENS_TRACE` 会记录 LSP 方法调用。
+- **稳定与跨平台：** 输出会排序、去重，并使用 LSP UTF-16 位置；CodeLens 服务器构建时不需要 C 编译器，支持 macOS、Linux、Windows 的 arm64 和 x86-64，发布文件经过 SHA-256 校验。
 
-## 技术特性
+## 性能
 
-- **精确语义：** 最终关系全部由 `go/types` 校验；基于名称的索引只用于缩小候选集，绝不代替正确性判断。
-- **增量引擎：** 函数体修改只重检已知包所有者；API 修改重检反向依赖闭包；源码结构、模块元数据等不安全变化回退到一次完整 `packages.Load`。
-- **不可变版本：** 包事实、关系索引和快照使用写时复制更新，并发读取者可以安全共享未变化的 map、slice 与导航目标。
-- **高效文档编辑：** UTF-8 gap buffer 配合行首索引处理 UTF-16 LSP 增量编辑，无需每次重建全文。
-- **有界并发与缓存：** 同一版本的请求共享一次分析；过时结果无法发布，无等待者的任务会被取消，作用域和快照缓存都有固定上限。
-- **低磁盘活动：** 只在必要的文档生命周期或精确编译源码路径上读取文件。默认情况下插件不写日志、语义索引或持久缓存；只有显式启用 `GO_CODELENS_TRACE` 时才会写入协议方法跟踪，初次加载包时 Go 工具链也可能使用标准 Go 构建缓存。
-- **确定性输出：** CodeLens 和导航目标会排序、去重，并使用正确的 LSP UTF-16 位置。
-- **跨平台可信交付：** 无 cgo 的 Go Sidecar 支持 macOS、Linux、Windows 的 arm64 和 x86-64；发布资源固定到扩展版本并经过 SHA-256 校验，六个目标的原生测试与构建都是发布门槛。
+在 Apple M1 Pro、Go 1.26.5 上，对未经修改的 Kubernetes 浅克隆（不含完整历史）进行了测试。
 
-## 性能展示
-
-性能优化由单元、差分、集成、模糊、race、分配、取消和端到端基准共同约束。首个大型真实项目验收样本是在 Apple M1 Pro、Go 1.26.5 环境下，对未经修改的 Kubernetes 浅克隆进行的。
-
-| Kubernetes 样本               |                                       数值 |
-| ----------------------------- | -----------------------------------------: |
-| Commit                        | `b882c60b4023bdf09264c2d5d30a2cadebc240fb` |
-| 检出目录大小                  |                                    395 MiB |
-| 受版本控制的非 vendor Go 文件 |                                     13,414 |
-| `go.work` 中的模块            |                                         34 |
-| 整个工作区的包                |                                      3,029 |
-| 示例文档                      |                   `pkg/probe/exec/exec.go` |
+| Kubernetes 测试项目                 |                                       数值 |
+| ----------------------------------- | -----------------------------------------: |
+| 提交                                | `b882c60b4023bdf09264c2d5d30a2cadebc240fb` |
+| 检出目录大小                        |                                    395 MiB |
+| 受版本控制的 Go 文件（不含 vendor） |                                     13,414 |
+| `go.work` 中的模块                  |                                         34 |
+| 工作区中的包                        |                                      3,029 |
+| 请求 CodeLens 的文件                |                   `pkg/probe/exec/exec.go` |
 
 | 测量项                             |       结果 |
 | ---------------------------------- | ---------: |
 | 首次完整工作区分析与 CodeLens 请求 |  4m42.692s |
-| 同一进程中的语义快照缓存命中       | 249.958 µs |
+| 同一进程中的缓存重复请求           | 249.958 µs |
 | 返回的 CodeLens 数量               |         10 |
-| 已取消请求的返回延迟               |   4.542 µs |
-| 底层分析器的取消延迟               |   1.967 ms |
-| 最大常驻内存                       |   3.69 GiB |
-| macOS 峰值 memory footprint        |   6.66 GiB |
-| 交换次数                           |          0 |
+| 请求取消后的返回时间               |   4.542 µs |
+| 分析器停止所需时间                 |   1.967 ms |
+| 进程内存峰值                       |   3.69 GiB |
+| macOS 报告的内存峰值               |   6.66 GiB |
+| 使用的交换空间                     |          0 |
 
-这是一组真实项目的单次验收观察，并非经过统计采样的基准。冷启动结果有意覆盖 `go.work` 中全部 34 个模块并启用测试变体，主要成本来自首次 `packages.Load` 和 Go 工具链构建包图。不可变语义快照发布后，重复请求可以在微秒级返回，不会再次进入分析器；Kubernetes 示例中预期的 10 个透镜全部得到保留。
+这是一次观察，不是经过统计采样的基准。首次分析包含全部 34 个模块并启用测试，大部分时间用于首次 `packages.Load`；缓存后的重复请求在微秒级返回，预期的 10 个 CodeLens 全部存在。
 
-运行 `./scripts/benchmark-server.sh` 可以执行项目维护的正确性、race、基准、分配和 profile 套件。profile 默认写入 `$TMPDIR` 下的目录，不进入仓库。
+`just bench` 运行正确性、竞态、基准、内存分配和性能分析测试；性能分析文件写入 `$TMPDIR`。
 
 ## 开发与构建
 
-当前代码的环境要求：
+要求：Zed 1.14.2+、Go 1.27+、含 `wasm32-wasip2` 的 Rust、just 1.56+、golangci-lint。
 
-- Zed 1.14.2 或更高版本
-- Go 1.26 或更高版本
-- 通过 `rustup` 安装 Rust，并包含 `wasm32-wasip2` 目标
+用 `just install` 构建并安装当前主机的 CodeLens 服务器（默认 `~/.local/bin`；Zed 使用其他目录时设置 `GO_CODELENS_BIN_DIR`）。从扩展仓库安装不需要本地工具：没有 `PATH` 覆盖时，Zed 会下载匹配的可执行文件。
 
-在 macOS 或 Linux 上进行本地开发时，可构建当前主机的原生 Sidecar 并安装到 `~/.local/bin`：
+| 命令                                    | 用途                               |
+| --------------------------------------- | ---------------------------------- |
+| `just build` / `just build linux amd64` | 构建当前主机或指定目标             |
+| `just build-wasm`                       | 构建 WebAssembly 适配层            |
+| `just install`                          | 构建并安装当前主机的服务器         |
+| `just fmt`                              | 格式化 Go、Rust 和 justfile        |
+| `just test` / `just race`               | 运行测试 / 竞态检测                |
+| `just vet` / `just lint`                | 用 `go vet` 检查 / lint Go 和 Rust |
+| `just check`                            | 执行完整的本地验证                 |
+| `just bench`                            | 运行测试、基准和性能分析           |
+| `just set-version 0.3.3`                | 更新发布版本                       |
+| `just check-version`                    | 检查发布版本是否一致               |
 
-```sh
-./scripts/install-server.sh
-```
-
-Windows 使用对应的 PowerShell 安装脚本：
-
-```powershell
-pwsh -File .\scripts\install-server.ps1
-```
-
-`~/.local/bin` 只是开发安装脚本的默认值，并不是 Zed 固定的扩展安装位置。如果 Zed 继承的 `PATH` 使用其他目录，可以设置 `GO_CODELENS_BIN_DIR`。市场版无需运行这些脚本：没有 PATH 覆盖时，Zed 会把版本匹配的二进制下载到由自身管理、随平台而异的扩展工作目录。
-
-构建脚本也接受显式目标，便于在一台机器上检查全部构建产物：
+`just build [os] [arch] [output]` 接受与构建脚本相同的目标和输出路径；相对路径以仓库根目录为基准：
 
 ```sh
-./scripts/build-server.sh linux amd64
-./scripts/build-server.sh windows arm64
+just build windows arm64
+just build linux amd64 bin/custom-server
 ```
 
-```powershell
-pwsh -File .\scripts\build-server.ps1 -TargetOS windows -TargetArch arm64
-```
+Windows 下，just 的任务都通过 Git Bash 的 `sh` 执行，因此 `sh` 必须在 `PATH` 中；build 和 install 直接调用 PowerShell 7（`pwsh`），版本检查还需要 `awk`。
 
-支持的发布目标如下：
+支持的发布目标：
 
-| 操作系统 | 架构   | 发布目标三元组              |
+| 操作系统 | 架构   | 发布目标标识符              |
 | -------- | ------ | --------------------------- |
 | macOS    | arm64  | `aarch64-apple-darwin`      |
 | macOS    | x86-64 | `x86_64-apple-darwin`       |
@@ -128,41 +109,19 @@ pwsh -File .\scripts\build-server.ps1 -TargetOS windows -TargetArch arm64
 | Windows  | arm64  | `aarch64-pc-windows-msvc`   |
 | Windows  | x86-64 | `x86_64-pc-windows-msvc`    |
 
-安装本地 Sidecar 后，在 Zed 中运行 `zed: install dev extension` 并选择本仓库；后续更新可运行 `zed: rebuild dev extension`。仓库中的 `.zed/settings.json` 会让 `gopls` 与 `go-codelens` 同时保持活动。
+安装 CodeLens 服务器后，在 Zed 中运行 `zed: install dev extension` 并选择本仓库，或在修改后运行 `zed: rebuild dev extension`。`.zed/settings.json` 会让 `gopls` 和 `go-codelens` 同时运行。
 
-完整验证命令：
+`just check` 执行完整验证。任务设置 `GOWORK=off`，临时文件使用 `TMPDIR`/`TEMP`/`/tmp`，`GOCACHE` 默认放在该目录下的 `go-build-cache`（已有的 `GOCACHE` 会保留）。竞态检测设置 `GOMAXPROCS=1`，以避开 `AGENTS.md` 记录的 Go 1.27 `go/types` 问题；`BENCHMARK_OUTPUT_DIR` 可以指定其他输出目录。
 
-```sh
-cd server
-env GOWORK=off TMPDIR=/tmp GOCACHE=/tmp/go-build-cache go test ./...
-env GOWORK=off TMPDIR=/tmp GOCACHE=/tmp/go-build-cache go test -race ./...
-env GOWORK=off TMPDIR=/tmp GOCACHE=/tmp/go-build-cache go vet ./...
-golangci-lint run --config ../.golangci.yaml ./...
-cd ..
-cargo fmt -- --check
-cargo test
-cargo build --target wasm32-wasip2
-```
-
-发布前只需用一条命令更新版本：
-
-```sh
-./scripts/set-version.sh 0.3.3
-```
-
-脚本会先生成全部修改再写入工作树，同步 `extension.toml`、`Cargo.toml`、`Cargo.lock` 与原生服务器报告的版本，并验证锁定的 Cargo 元数据；验证失败时会恢复原文件。Release 工作流会以只读 `--check` 模式调用同一个脚本，使本地发布准备与 CI 校验始终使用同一套规则。
-
-CI 会在六个目标各自的 GitHub 原生托管 Runner 上运行 Go 测试和无 cgo 构建，并额外在 Linux amd64 上运行 race detector，在独立任务中验证 Rust/Wasm 适配层。推送 `v<版本>` 标签后，只有标签、`Cargo.toml`、`extension.toml` 与原生服务器报告的版本一致时才会继续发布；工作流会生成六个原生裸二进制和确定性的 `SHA256SUMS`，扩展适配层只下载与自身版本完全一致的资源。
-
-`examples/poc/main.go` 是小型功能样本。原生二进制、基准 profile 和 `extension.wasm` 都有意排除在版本控制之外。
+`just set-version 0.3.3` 更新 `extension.toml`、`Cargo.toml` 和 `Cargo.lock` 中的版本字段，验证失败时恢复原文件。构建时会注入版本；直接运行 `go build` 或 `go run` 报告 `dev`。CI 在六个目标上运行测试和不需要 C 编译器的构建，在 Linux amd64 上运行竞态检测，并运行 Rust/WebAssembly 检查；版本匹配的 `v<版本>` 标签会发布六个可执行文件和 `SHA256SUMS`，扩展只下载自身版本的文件。
 
 ## 当前 Zed 限制
 
-- 在 Zed 1.14.2 中，即使 `lsp_results_location` 设置为 `"picker"`，包含多个目标的 CodeLens 兼容命令仍会打开 multibuffer；CodeLens 使用 picker 需要 Zed 上游提供能力。
-- CodeLens 字体由 Zed 的编辑器设置控制；LSP 与扩展 API 都不支持单独设置透镜字体。
-- Zed 扩展 API 没有暴露 VSCode 扩展使用的自定义 gutter 装饰或树形侧边栏；核心关系数据已尽可能通过可导航 CodeLens 呈现。
-- 选定模块或 `go.work` 作用域之外的依赖会参与类型信息解析，但不会显示透镜；空接口有意报告零个有意义的实现。
-- 市场版必须存在同版本的 `v<版本>` GitHub Release，并包含全部六个二进制和 `SHA256SUMS`；在该 Release 创建前，开发检出仍可继续使用 PATH 中安装的 Sidecar。
+- 截至 Zed 1.16.2，点击包含多个目标的 CodeLens 总会打开 Zed 的 multibuffer；这条路径不读取 `lsp_results_location`，因此 `"picker"` 不影响 CodeLens 点击。通过 Zed 导航仍可使用 picker，例如在符号上 cmd+点击，或为 `editor: find all references` 绑定 `"open_results_in": "picker"`；让 CodeLens 点击进入 picker 需要 Zed 本身支持。
+- CodeLens 字体由 Zed 编辑器设置控制；LSP 和扩展 API 不支持为单个 CodeLens 设置字体。
+- Zed 扩展 API 不提供 VS Code 扩展的自定义 gutter 装饰或树形侧边栏；关系数据通过可点击的 CodeLens 显示。
+- 选定模块或 `go.work` 工作区之外的依赖会参与类型信息解析，但没有 CodeLens。空接口报告零个有意义的实现。
+- 从扩展仓库安装需要同版本的 `v<版本>` GitHub Release，其中包含六个可执行文件和 `SHA256SUMS`；在 Release 创建前，开发副本可以使用 `PATH` 中的 `go-codelens-ls`。
 
 ## 许可证
 

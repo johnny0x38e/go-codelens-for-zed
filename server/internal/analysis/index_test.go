@@ -8,8 +8,8 @@ import (
 func TestFactIndexReplacesOnlyOwnedPackageContributions(t *testing.T) {
 	t.Parallel()
 
-	declarationID := newSymbolID("example.com/index", "", "Value", symbolFunction, 0)
-	methodID := newSymbolID("example.com/index", "type:Value", "Run", symbolMethod, 0)
+	declarationID := newSymbolID("example.com/index", "", "Value", symbolFunction)
+	methodID := newSymbolID("example.com/index", "type:Value", "Run", symbolMethod)
 	declarationLocation := benchmarkLocation("declaration", 0)
 	oldUseLocation := benchmarkLocation("use", 1)
 	peerUseLocation := benchmarkLocation("use", 2)
@@ -46,7 +46,13 @@ func TestFactIndexReplacesOnlyOwnedPackageContributions(t *testing.T) {
 	if got := index.declarations[declarationID]; len(got) != 1 || !got[0].showZero {
 		t.Fatalf("merged declaration facts = %#v, want one show-zero declaration", got)
 	}
-	if got, want := index.referenceTargets[declarationID], []Location{oldUseLocation, peerUseLocation}; !reflect.DeepEqual(got, want) {
+	if got, want := index.referenceTargets[declarationID], []Location{
+		oldUseLocation,
+		peerUseLocation,
+	}; !reflect.DeepEqual(
+		got,
+		want,
+	) {
 		t.Fatalf("initial reference targets = %#v, want %#v", got, want)
 	}
 	if got, want := index.referenceTargets[methodID], []Location{oldUseLocation}; !reflect.DeepEqual(got, want) {
@@ -73,13 +79,25 @@ func TestFactIndexReplacesOnlyOwnedPackageContributions(t *testing.T) {
 		changes.namedTypeMethodIDs != nil || changes.concreteMethodIdentities != nil {
 		t.Fatalf("use-only replacement allocated semantic change sets: %#v", changes)
 	}
-	if got, want := next.referenceTargets[declarationID], []Location{peerUseLocation, newUseLocation}; !reflect.DeepEqual(got, want) {
+	if got, want := next.referenceTargets[declarationID], []Location{
+		peerUseLocation,
+		newUseLocation,
+	}; !reflect.DeepEqual(
+		got,
+		want,
+	) {
 		t.Fatalf("updated reference targets = %#v, want %#v", got, want)
 	}
 	if _, exists := next.referenceTargets[methodID]; exists {
 		t.Fatalf("removed method-use target %q remains indexed", methodID.name())
 	}
-	if got, want := index.referenceTargets[declarationID], []Location{oldUseLocation, peerUseLocation}; !reflect.DeepEqual(got, want) {
+	if got, want := index.referenceTargets[declarationID], []Location{
+		oldUseLocation,
+		peerUseLocation,
+	}; !reflect.DeepEqual(
+		got,
+		want,
+	) {
 		t.Fatalf("previous immutable index changed: got %#v, want %#v", got, want)
 	}
 }

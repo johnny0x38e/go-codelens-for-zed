@@ -3,8 +3,8 @@ name = "Go CodeLens"
 description = "Shows Go references and interface implementations as CodeLens entries."
 version = "0.3.2"
 schema_version = 1
-authors = ["Johnny <huangjianit@gmail.com>"]
-repository = "https://github.com/Johnny0x38E/go-codelens-for-zed"
+authors = ["Johnny"]
+repository = "https://github.com/johnny0x38e/go-codelens-for-zed"
 
 [language_servers.go-codelens]
 name = "Go CodeLens"

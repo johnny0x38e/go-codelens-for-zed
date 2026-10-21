@@ -3,7 +3,7 @@ package lsp
 import (
 	"encoding/json"
 
-	"github.com/johnny/go-codelens-for-zed/server/internal/analysis"
+	"github.com/johnny0x38e/go-codelens-for-zed/server/internal/analysis"
 )
 
 type request struct {
@@ -41,10 +41,15 @@ type clientCapabilities struct {
 
 type workspaceClientCapabilities struct {
 	DidChangeWatchedFiles didChangeWatchedFilesClientCapabilities `json:"didChangeWatchedFiles"`
+	CodeLens              codeLensClientCapabilities              `json:"codeLens"`
 }
 
 type didChangeWatchedFilesClientCapabilities struct {
 	DynamicRegistration bool `json:"dynamicRegistration"`
+}
+
+type codeLensClientCapabilities struct {
+	RefreshSupport bool `json:"refreshSupport"`
 }
 
 type workspaceFolder struct {
@@ -127,6 +132,16 @@ type didChangeWatchedFilesRegisterOptions struct {
 
 type fileSystemWatcher struct {
 	GlobPattern string `json:"globPattern"`
+}
+
+// codeLensRefreshRequest asks the client to discard cached CodeLens payloads
+// and re-query textDocument/codeLens. A server request needs an ID so the
+// client can acknowledge it; the server ignores that acknowledgement.
+type codeLensRefreshRequest struct {
+	JSONRPC string `json:"jsonrpc"`
+	ID      string `json:"id"`
+	Method  string `json:"method"`
+	Params  any    `json:"params"`
 }
 
 type codeLens struct {

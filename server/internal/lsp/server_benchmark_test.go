@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johnny/go-codelens-for-zed/server/internal/analysis"
-	"github.com/johnny/go-codelens-for-zed/server/internal/testutil"
+	"github.com/johnny0x38e/go-codelens-for-zed/server/internal/analysis"
+	"github.com/johnny0x38e/go-codelens-for-zed/server/internal/testutil"
 )
 
 var (
@@ -25,7 +25,11 @@ var (
 func BenchmarkSnapshotForScopeCacheHit(b *testing.B) {
 	moduleDir := b.TempDir()
 	writeBenchmarkFile(b, filepath.Join(moduleDir, "go.mod"), []byte("module example.com/bench\n\ngo 1.26\n"))
-	writeBenchmarkFile(b, filepath.Join(moduleDir, "bench.go"), []byte("package bench\n\ntype Runner interface { Run() }\ntype Worker struct{}\nfunc (Worker) Run() {}\n"))
+	writeBenchmarkFile(
+		b,
+		filepath.Join(moduleDir, "bench.go"),
+		[]byte("package bench\n\ntype Runner interface { Run() }\ntype Worker struct{}\nfunc (Worker) Run() {}\n"),
+	)
 
 	state := newServerState()
 	scope := analysis.ModuleAnalysisScope(moduleDir)
@@ -119,7 +123,13 @@ func BenchmarkSemanticCodeLensesCacheHit(b *testing.B) {
 	moduleRoot := b.TempDir()
 	writeBenchmarkFile(b, filepath.Join(moduleRoot, "go.mod"), []byte("module example.com/bench\n\ngo 1.26\n"))
 	filename := filepath.Join(moduleRoot, "bench.go")
-	writeBenchmarkFile(b, filename, []byte("package bench\n\ntype Runner interface { Run() }\ntype Worker struct{}\nfunc (Worker) Run() {}\nfunc Use(r Runner) { r.Run() }\n"))
+	writeBenchmarkFile(
+		b,
+		filename,
+		[]byte(
+			"package bench\n\ntype Runner interface { Run() }\ntype Worker struct{}\nfunc (Worker) Run() {}\nfunc Use(r Runner) { r.Run() }\n",
+		),
+	)
 	params, err := json.Marshal(map[string]any{
 		"textDocument": map[string]any{"uri": semanticTestFileURI(b, filename)},
 	})
@@ -280,11 +290,11 @@ func BenchmarkEditToCodeLensIncremental64Packages(b *testing.B) {
 	}
 	state := newServerState()
 	state.workspaceRoots = []string{fixture.Root}
-	if _, _, err := state.documents.Open(uri, string(content), 1); err != nil {
-		b.Fatalf("open benchmark document: %v", err)
+	if _, _, openErr := state.documents.Open(uri, string(content), 1); openErr != nil {
+		b.Fatalf("open benchmark document: %v", openErr)
 	}
-	if _, err := state.semanticCodeLenses(context.Background(), codeLensParams); err != nil {
-		b.Fatalf("prime Code Lenses: %v", err)
+	if _, lensErr := state.semanticCodeLenses(context.Background(), codeLensParams); lensErr != nil {
+		b.Fatalf("prime Code Lenses: %v", lensErr)
 	}
 
 	b.ReportAllocs()

@@ -42,6 +42,7 @@ type scopeIndex struct {
 	reverseImports map[string][]string
 	importTypes    map[string]*types.Package
 	fingerprints   map[string]sourceFingerprint
+	fileIdentities map[string]fileIdentity
 	facts          *factIndex
 	relationships  *relationshipIndex
 	changedLenses  []lensKey
@@ -165,19 +166,32 @@ func buildScopeIndex(
 		}
 	}
 
-	return newScopeIndexFromStatesAndFingerprints(scope, states, fingerprints)
+	paths := make([]string, 0, len(states))
+	seenPaths := make(map[string]struct{}, len(states))
+	for _, state := range states {
+		for _, file := range state.files {
+			if _, seen := seenPaths[file.path]; seen {
+				continue
+			}
+			seenPaths[file.path] = struct{}{}
+			paths = append(paths, file.path)
+		}
+	}
+	fileIdentities := buildFileIdentities(paths)
+	return newScopeIndexFromStatesAndFingerprints(scope, states, fingerprints, fileIdentities)
 }
 
 func newScopeIndexFromStates(scope AnalysisScope, states map[string]*packageState) (*scopeIndex, error) {
-	return newScopeIndexFromStatesAndFingerprints(scope, states, nil)
+	return newScopeIndexFromStatesAndFingerprints(scope, states, nil, nil)
 }
 
 func newScopeIndexFromStatesAndFingerprints(
 	scope AnalysisScope,
 	states map[string]*packageState,
 	fingerprints map[string]sourceFingerprint,
+	fileIdentities map[string]fileIdentity,
 ) (*scopeIndex, error) {
-	index, err := newScopeIndexMetadata(scope, states, fingerprints)
+	index, err := newScopeIndexMetadata(scope, states, fingerprints, fileIdentities)
 	if err != nil {
 		return nil, err
 	}
@@ -194,6 +208,7 @@ func newScopeIndexMetadata(
 	scope AnalysisScope,
 	states map[string]*packageState,
 	fingerprints map[string]sourceFingerprint,
+	fileIdentities map[string]fileIdentity,
 ) (*scopeIndex, error) {
 	packagesByID := make(map[string]*packageState, len(states))
 	for packageID, state := range states {
@@ -218,8 +233,10 @@ func newScopeIndexMetadata(
 		reverseImports: make(map[string][]string),
 		importTypes:    make(map[string]*types.Package),
 		fingerprints:   fingerprints,
+		fileIdentities: fileIdentities,
 	}
-	packageIDs := sortedPackageIDs(packagesByID)
+	packageIDs := slices.AppendSeq(make([]string, 0, len(packagesByID)), maps.Keys(packagesByID))
+	slices.Sort(packageIDs)
 	for _, packageID := range packageIDs {
 		state := packagesByID[packageID]
 		for _, file := range state.files {
@@ -316,7 +333,9 @@ func (i *scopeIndex) buildImportTypes(packageIDs []string) error {
 }
 
 func validateTypeUniverse(states map[string]*packageState) error {
-	for _, packageID := range sortedPackageIDs(states) {
+	packageIDs := slices.AppendSeq(make([]string, 0, len(states)), maps.Keys(states))
+	slices.Sort(packageIDs)
+	for _, packageID := range packageIDs {
 		state := states[packageID]
 		if state.types == nil {
 			continue
@@ -392,13 +411,13 @@ func (i *scopeIndex) reloadPlanFor(changes ChangeSet) reloadPlan {
 	return reloadPlan{packageIDs: packageIDs}
 }
 
-func (i *scopeIndex) reverseClosure(seeds []string) []string {
+func (i *scopeIndex) reverseClosure(seeds []string) ([]string, error) {
 	if len(seeds) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	// Breadth-first traversal finds the transitive dependent set without
-	// recursion; ordering is imposed separately by the import postorder below.
+	// Breadth-first traversal finds the transitive dependent set. The shared
+	// recheck ordering below handles import edges, test variants, and cycles.
 	closure := make(map[string]struct{}, len(seeds))
 	queue := make([]string, 0, len(seeds))
 	for _, packageID := range seeds {
@@ -411,7 +430,6 @@ func (i *scopeIndex) reverseClosure(seeds []string) []string {
 		closure[packageID] = struct{}{}
 		queue = append(queue, packageID)
 	}
-	slices.Sort(queue)
 	for head := 0; head < len(queue); head++ {
 		for _, dependentID := range i.reverseImports[queue[head]] {
 			if _, exists := closure[dependentID]; exists {
@@ -422,50 +440,22 @@ func (i *scopeIndex) reverseClosure(seeds []string) []string {
 		}
 	}
 
-	// Postorder traversal over imports emits dependencies before dependents.
-	orderedIDs := make([]string, 0, len(closure))
-	visitState := make(map[string]uint8, len(closure))
-	var visit func(string)
-	visit = func(packageID string) {
-		switch visitState[packageID] {
-		case 1, 2:
-			return
-		}
-		visitState[packageID] = 1
-		state := i.packages[packageID]
-		dependencies := make([]string, 0, len(state.imports))
-		for _, importedID := range state.imports {
-			if _, included := closure[importedID]; included {
-				dependencies = append(dependencies, importedID)
-			}
-		}
-		slices.Sort(dependencies)
-		dependencies = slices.Compact(dependencies)
-		for _, importedID := range dependencies {
-			visit(importedID)
-		}
-		visitState[packageID] = 2
-		orderedIDs = append(orderedIDs, packageID)
-	}
-	for _, packageID := range sortedSetKeys(closure) {
-		visit(packageID)
-	}
-	return orderedIDs
+	return orderRecheckPackageIDs(i, queue)
 }
 
 func (i *scopeIndex) withPackageStates(replacements map[string]*packageState) (*scopeIndex, error) {
-	return i.withPackageStatesAndFingerprints(replacements, nil)
+	return i.withPackageStatesAndFingerprints(replacements, nil, nil)
 }
 
 func (i *scopeIndex) withPackageStatesAndFingerprints(
 	replacements map[string]*packageState,
 	updates map[string]sourceFingerprint,
+	identityUpdates map[string]fileIdentity,
 ) (*scopeIndex, error) {
 	// Construct the next revision off to the side. Published scope indexes are
 	// immutable, so readers can use an old snapshot without synchronization
 	// while this copy-on-write update is assembled.
-	states := make(map[string]*packageState, len(i.packages))
-	maps.Copy(states, i.packages)
+	states := maps.Clone(i.packages)
 	for packageID, replacement := range replacements {
 		if states[packageID] == nil {
 			return nil, fmt.Errorf("cannot replace unknown package %q", packageID)
@@ -481,7 +471,8 @@ func (i *scopeIndex) withPackageStatesAndFingerprints(
 		maps.Copy(fingerprints, i.fingerprints)
 		maps.Copy(fingerprints, updates)
 	}
-	next, err := newScopeIndexMetadata(i.scope, states, fingerprints)
+	fileIdentities := mergeFileIdentities(i.fileIdentities, identityUpdates)
+	next, err := newScopeIndexMetadata(i.scope, states, fingerprints, fileIdentities)
 	if err != nil {
 		return nil, err
 	}
@@ -526,24 +517,6 @@ func cloneAnalysisScope(scope AnalysisScope) AnalysisScope {
 	scope.ModuleRoots = slices.Clone(scope.ModuleRoots)
 	scope.Patterns = slices.Clone(scope.Patterns)
 	return scope
-}
-
-func sortedPackageIDs(states map[string]*packageState) []string {
-	result := make([]string, 0, len(states))
-	for packageID := range states {
-		result = append(result, packageID)
-	}
-	slices.Sort(result)
-	return result
-}
-
-func sortedSetKeys(values map[string]struct{}) []string {
-	result := make([]string, 0, len(values))
-	for value := range values {
-		result = append(result, value)
-	}
-	slices.Sort(result)
-	return result
 }
 
 func canonicalizeStringLists(lists map[string][]string) {

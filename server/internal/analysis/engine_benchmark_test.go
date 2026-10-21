@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/johnny/go-codelens-for-zed/server/internal/testutil"
+	"github.com/johnny0x38e/go-codelens-for-zed/server/internal/testutil"
 )
 
 var (

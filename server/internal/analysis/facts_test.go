@@ -70,16 +70,16 @@ func TestExternal(t *testing.T) {
 	}
 
 	want := []symbolID{
-		newSymbolID("example.com/facts", "", "Answer", symbolConstant, 0),
-		newSymbolID("example.com/facts", "", "Box", symbolType, 0),
-		newSymbolID("example.com/facts", "", "Global", symbolVariable, 0),
-		newSymbolID("example.com/facts", "", "Make", symbolFunction, 0),
-		newSymbolID("example.com/facts", "", "Reader", symbolType, 0),
-		newSymbolID("example.com/facts", "func:Make", "U", symbolTypeParameter, 0),
-		newSymbolID("example.com/facts", "type:Box", "Read", symbolMethod, 0),
-		newSymbolID("example.com/facts", "type:Box", "T", symbolTypeParameter, 0),
-		newSymbolID("example.com/facts", "type:Box", "Value", symbolField, 0),
-		newSymbolID("example.com/facts", "type:Reader", "Read", symbolMethod, 0),
+		newSymbolID("example.com/facts", "", "Answer", symbolConstant),
+		newSymbolID("example.com/facts", "", "Box", symbolType),
+		newSymbolID("example.com/facts", "", "Global", symbolVariable),
+		newSymbolID("example.com/facts", "", "Make", symbolFunction),
+		newSymbolID("example.com/facts", "", "Reader", symbolType),
+		newSymbolID("example.com/facts", "func:Make", "U", symbolTypeParameter),
+		newSymbolID("example.com/facts", "type:Box", "Read", symbolMethod),
+		newSymbolID("example.com/facts", "type:Box", "T", symbolTypeParameter),
+		newSymbolID("example.com/facts", "type:Box", "Value", symbolField),
+		newSymbolID("example.com/facts", "type:Reader", "Read", symbolMethod),
 	}
 	for _, id := range want {
 		if _, ok := firstIDs[id]; !ok {
@@ -91,7 +91,7 @@ func TestExternal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PathToURI(%q) error = %v", productionFile, err)
 	}
-	boxID := newSymbolID("example.com/facts", "", "Box", symbolType, 0)
+	boxID := newSymbolID("example.com/facts", "", "Box", symbolType)
 	var productionOwners []string
 	for packageID, facts := range first {
 		if facts.packagePath != "example.com/facts" || !factsContainDeclaration(facts, boxID, productionURI) {
@@ -207,6 +207,7 @@ func assertFactTypeMemoryBoundary(
 	}
 	seen[typeToCheck] = struct{}{}
 
+	//exhaustive:ignore Only composite kinds contain nested types to inspect.
 	switch typeToCheck.Kind() {
 	case reflect.Pointer, reflect.Slice, reflect.Array:
 		if typeToCheck.Kind() == reflect.Slice && typeToCheck.Elem().Kind() == reflect.Uint8 {

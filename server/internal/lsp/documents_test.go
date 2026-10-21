@@ -286,7 +286,12 @@ func TestDocumentStoreInvalidIncrementalChangePreservesVersionAndContent(t *test
 		t.Fatalf("overlay after invalid change = %q, want %q", got, want)
 	}
 
-	if _, changed, err := store.Change(uri, 7, []textDocumentContentChangeEvent{{Text: original}}); err != nil || !changed {
+	if _, changed, err := store.Change(
+		uri,
+		7,
+		[]textDocumentContentChangeEvent{{Text: original}},
+	); err != nil ||
+		!changed {
 		t.Fatalf("replacement Change() = (changed %t, error %v), want (true, nil)", changed, err)
 	}
 	if document.version != 7 {
