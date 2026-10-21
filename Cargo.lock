@@ -227,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "go-codelens-for-zed"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "sha2",
  "zed_extension_api",
