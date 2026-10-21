@@ -1,0 +1,29 @@
+# Opens a pull request against zed-industries/extensions for each release tag.
+# Requires a repository secret named COMMITTER_TOKEN: a classic personal access
+# token with `repo` and `workflow` scopes for the repository owner.
+# This workflow can only update an extension that is already in the registry.
+name: Update Zed extension registry
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zed-registry-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open registry update pull request
+        uses: huacnlee/zed-extension-action@8cd592a0d24e1e41157740f1a529aeabddc88a1b # v2.0.0
+        with:
+          extension-name: go-codelens
+          push-to: johnny0x38e/extensions
+        env:
+          COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}

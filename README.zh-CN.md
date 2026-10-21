@@ -115,6 +115,8 @@ Windows 下，just 的任务都通过 Git Bash 的 `sh` 执行，因此 `sh` 必
 
 `just set-version 0.3.3` 更新 `extension.toml`、`Cargo.toml` 和 `Cargo.lock` 中的版本字段，验证失败时恢复原文件。构建时会注入版本；直接运行 `go build` 或 `go run` 报告 `dev`。CI 在六个目标上运行测试和不需要 C 编译器的构建，在 Linux amd64 上运行竞态检测，并运行 Rust/WebAssembly 检查；版本匹配的 `v<版本>` 标签会发布六个可执行文件和 `SHA256SUMS`，扩展只下载自身版本的文件。
 
+推送 `v<版本>` 标签后，还会通过 [huacnlee/zed-extension-action](https://github.com/huacnlee/zed-extension-action) 打开扩展注册表的更新 PR。需要在仓库中配置名为 `COMMITTER_TOKEN` 的 secret，使用带 `repo` 和 `workflow` 权限的经典 GitHub personal access token。它只负责创建 PR，合并仍由维护者审核决定；该自动化会在扩展被 `zed-industries/extensions` 接受后生效。
+
 ## 当前 Zed 限制
 
 - 截至 Zed 1.16.2，点击包含多个目标的 CodeLens 总会打开 Zed 的 multibuffer；这条路径不读取 `lsp_results_location`，因此 `"picker"` 不影响 CodeLens 点击。通过 Zed 导航仍可使用 picker，例如在符号上 cmd+点击，或为 `editor: find all references` 绑定 `"open_results_in": "picker"`；让 CodeLens 点击进入 picker 需要 Zed 本身支持。

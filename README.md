@@ -115,6 +115,8 @@ After installing the CodeLens server, run `zed: install dev extension` and selec
 
 `just set-version 0.3.3` updates the version fields in `extension.toml`, `Cargo.toml`, and `Cargo.lock` and restores them if validation fails. Builds inject the version; direct `go build` or `go run` reports `dev`. CI runs tests and builds that do not need a C compiler on all six targets, the race detector on Linux amd64, and Rust/WebAssembly checks. A matching `v<version>` tag publishes six executables and `SHA256SUMS`; the extension downloads only files for its own version.
 
+A `v<version>` tag also opens a registry update PR through [huacnlee/zed-extension-action](https://github.com/huacnlee/zed-extension-action). Configure a repository secret named `COMMITTER_TOKEN` with a classic GitHub personal access token that has `repo` and `workflow` scopes. The action opens the PR; a maintainer still reviews and merges it. This automation takes effect after the extension is accepted into `zed-industries/extensions`.
+
 ## Current Zed limitations
 
 - As of Zed 1.16.2, clicking a multi-target CodeLens always opens Zed's multibuffer; that path ignores `lsp_results_location`, so `"picker"` does not affect CodeLens clicks. Picker results still work through Zed navigation, such as cmd-clicking a symbol or binding `editor: find all references` with `"open_results_in": "picker"`; changing CodeLens clicks needs support from Zed itself.
