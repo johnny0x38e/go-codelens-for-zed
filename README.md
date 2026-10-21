@@ -2,13 +2,33 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Shows Go references and interface implementations as CodeLens entries in Zed. A CodeLens entry is the small clickable label above a declaration.
+Shows symbol reference counts and interface implementation relationships in Go code in Zed, with click-to-navigate support.
 
 Go interfaces are implemented implicitly, so an interface does not list its implementers and a concrete type does not say which interfaces it satisfies. `gopls` remains the primary Go language server but does not provide this relationship view. Go CodeLens runs as a separate auxiliary language server beside it, adds reference and implementation entries, and leaves completion, diagnostics, formatting, rename, and other Go editing features to `gopls`.
 
 The project was inspired by [Go Implementation Lens for Visual Studio Code](https://github.com/anirudhagarwal365/go-implementation-lens), created by [Anirudh Agarwal](https://github.com/anirudhagarwal365). This repository is an independent implementation for Zed, built on Go's type system.
 
 <img src="assets/screenshot.png" alt="CodeLens">
+
+## Install the development version
+
+The extension is not yet available in Zed's extension registry. To try it locally:
+
+1. Install Zed 1.14.2+, Go 1.27+, Rust with the `wasm32-wasip2` target, and just 1.56+.
+2. Clone this repository, then build and install the server:
+
+   ```sh
+   git clone https://github.com/johnny0x38e/go-codelens-for-zed.git
+   cd go-codelens-for-zed
+   just install
+   ```
+
+   The server is installed to `~/.local/bin` by default; make sure Zed can find it on `PATH`.
+3. In Zed, run `zed: install dev extension` and select the cloned repository.
+
+No explicit `language_servers` configuration is needed. If CodeLens is not visible, enable `"code_lens": "on"` in Zed's `settings.json`.
+
+After changing the extension, run `zed: rebuild dev extension`.
 
 ## Features
 
@@ -108,8 +128,6 @@ Supported targets:
 | Linux            | x86-64       | `x86_64-unknown-linux-gnu`  |
 | Windows          | arm64        | `aarch64-pc-windows-msvc`   |
 | Windows          | x86-64       | `x86_64-pc-windows-msvc`    |
-
-After installing the CodeLens server, run `zed: install dev extension` and select this repository, or `zed: rebuild dev extension` after changes. `.zed/settings.json` keeps `gopls` and `go-codelens` active together.
 
 `just check` runs the full suite. Tasks set `GOWORK=off`, use `TMPDIR`/`TEMP`/`/tmp` for temporary files, and put `GOCACHE` in `go-build-cache` under that directory (an existing `GOCACHE` is kept). Race sets `GOMAXPROCS=1` for the Go 1.27 `go/types` issue in `AGENTS.md`; `BENCHMARK_OUTPUT_DIR` selects another output directory.
 

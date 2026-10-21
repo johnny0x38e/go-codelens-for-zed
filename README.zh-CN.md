@@ -2,13 +2,33 @@
 
 [English](README.md) | **简体中文**
 
-在 Zed 中以 CodeLens 形式显示 Go 引用与接口实现关系。CodeLens 是显示在代码上方的一行可点击小字。
+在 Zed 的 Go 代码中显示符号引用计数与接口实现关系，点击即可跳转。
 
 Go 接口采用隐式实现，因此接口不会列出实现它的类型，具体类型也不会说明自己实现了哪些接口。`gopls` 仍是 Go 的主要语言服务器，但不提供这种关系视图。Go CodeLens 作为独立的辅助语言服务器与 `gopls` 同时运行，只补充引用和实现关系；补全、诊断、格式化、重命名等编辑功能仍由 `gopls` 负责。
 
 本项目受 [Anirudh Agarwal](https://github.com/anirudhagarwal365) 开发的 Visual Studio Code 扩展 [Go Implementation Lens](https://github.com/anirudhagarwal365/go-implementation-lens) 启发。本仓库是面向 Zed 的独立实现，基于 Go 的类型系统。
 
 <img src="assets/screenshot.png" alt="CodeLens">
+
+## 安装开发版本
+
+扩展尚未上架 Zed 扩展仓库，可以先在本地安装开发版本：
+
+1. 安装 Zed 1.14.2+、Go 1.27+、含 `wasm32-wasip2` 目标的 Rust，以及 just 1.56+。
+2. 克隆本仓库，然后构建并安装服务器：
+
+   ```sh
+   git clone https://github.com/johnny0x38e/go-codelens-for-zed.git
+   cd go-codelens-for-zed
+   just install
+   ```
+
+   服务器默认安装到 `~/.local/bin`，请确保 Zed 能通过 `PATH` 找到它。
+3. 在 Zed 中运行 `zed: install dev extension`，选择克隆的仓库目录。
+
+无需额外配置 `language_servers`。如果没有显示 CodeLens，请在 Zed 的 `settings.json` 中启用 `"code_lens": "on"`。
+
+修改扩展后，运行 `zed: rebuild dev extension`。
 
 ## 功能
 
@@ -108,8 +128,6 @@ Windows 下，just 的任务都通过 Git Bash 的 `sh` 执行，因此 `sh` 必
 | Linux    | x86-64 | `x86_64-unknown-linux-gnu`  |
 | Windows  | arm64  | `aarch64-pc-windows-msvc`   |
 | Windows  | x86-64 | `x86_64-pc-windows-msvc`    |
-
-安装 CodeLens 服务器后，在 Zed 中运行 `zed: install dev extension` 并选择本仓库，或在修改后运行 `zed: rebuild dev extension`。`.zed/settings.json` 会让 `gopls` 和 `go-codelens` 同时运行。
 
 `just check` 执行完整验证。任务设置 `GOWORK=off`，临时文件使用 `TMPDIR`/`TEMP`/`/tmp`，`GOCACHE` 默认放在该目录下的 `go-build-cache`（已有的 `GOCACHE` 会保留）。竞态检测设置 `GOMAXPROCS=1`，以避开 `AGENTS.md` 记录的 Go 1.27 `go/types` 问题；`BENCHMARK_OUTPUT_DIR` 可以指定其他输出目录。
 

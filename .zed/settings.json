@@ -1,8 +1,7 @@
 {
-    "code_lens": "on",
     "languages": {
         "Go": {
-            "language_servers": ["gopls", "go-codelens", "..."],
+            "language_servers": ["gopls", "go-codelens", "..."], // This configuration is not mandatory.
         },
     },
 }

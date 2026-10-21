@@ -52,7 +52,7 @@ Keep the package boundary `cmd/go-codelens-ls -> internal/lsp -> internal/analys
 - Keep receiver names consistent for each type.
 - Prefer the standard library where it is clear and efficient. Add dependencies only with a concrete maintenance or performance justification.
 - Preserve context cancellation on expensive loops and before publishing results.
-- Use `gofmt`; do not hand-align Go code.
+- Use `gofmt` and `golines`; do not hand-align Go code.
 
 ## Rust style
 
