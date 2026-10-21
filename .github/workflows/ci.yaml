@@ -134,8 +134,9 @@ jobs:
               working-directory: server
               env:
                   GOWORK: "off"
+              # v2.12.2 cannot read Go 1.27 export data (version 5).
               run: >-
-                  go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+                  go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
                   run --config ../.golangci.yaml ./...
 
     extension:
