@@ -21,7 +21,7 @@ go test ./...
 # concurrent go/packages checkers); remove once the toolchain includes CL 841585.
 GOMAXPROCS=1 go test -race ./...
 
-benchmark_pattern='Benchmark(AnalyzeScopeScale|AnalyzeModuleRepositoryFixture|SnapshotForScopeCacheHit|AnalysisScopeCacheHit|SemanticCodeLensesCacheHit|DocumentFullTextChange256KiB|DocumentIncrementalChange256KiB|TextBufferIncrementalEdit256KiB|TextBufferRandomJump256KiB|EditToCodeLensIncremental64Packages)$'
+benchmark_pattern='Benchmark(AnalyzeScopeScale|AnalyzeModuleRepositoryFixture|SnapshotForScopeCacheHit|AnalysisScopeCacheHit|SemanticCodeLensesCacheHit|DocumentFullTextChange256KiB|DocumentIncrementalChange256KiB|TextBufferIncrementalEdit256KiB|TextBufferRandomJump256KiB|UnsavedEditToCodeLens64Packages|EditorCodeLensRequests64Packages|SnapshotEditBurst|CancelQueuedAnalysis)$'
 go test -run '^$' -bench "$benchmark_pattern" -benchmem -count=5 ./internal/analysis ./internal/lsp
 
 profile_benchmark='^BenchmarkAnalyzeScopeScale/Packages_64$'

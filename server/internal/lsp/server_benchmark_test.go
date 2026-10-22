@@ -268,7 +268,9 @@ func BenchmarkTextBufferRandomJump256KiB(b *testing.B) {
 	}
 }
 
-func BenchmarkEditToCodeLensIncremental64Packages(b *testing.B) {
+// BenchmarkUnsavedEditToCodeLens64Packages excludes JSON notification decoding;
+// BenchmarkEditorCodeLensRequests64Packages measures the complete request path.
+func BenchmarkUnsavedEditToCodeLens64Packages(b *testing.B) {
 	fixture := testutil.WriteModule(b, testutil.ModuleSpec{
 		ModulePath:          "example.com/edit-to-codelens",
 		PackageCount:        64,
