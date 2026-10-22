@@ -1,7 +1,7 @@
 id = "go-codelens"
 name = "Go CodeLens"
 description = "Shows symbol reference counts and interface implementation relationships for Go code in Zed, with click-to-navigate support."
-version = "0.3.3"
+version = "0.3.4"
 schema_version = 1
 authors = ["Johnny Huang <johnnyh.dev@gmail.com>"]
 repository = "https://github.com/johnny0x38e/go-codelens-for-zed"
