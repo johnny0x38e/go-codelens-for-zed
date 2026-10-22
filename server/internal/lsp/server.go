@@ -37,6 +37,7 @@ type serverState struct {
 	snapshotCursor           int
 	analysisFlights          map[string]*analysisFlight
 	analysisContext          context.Context
+	analysisSlot             chan struct{}
 	findScope                func(string, string) (analysis.AnalysisScope, error)
 	engine                   *analysis.Engine
 	forgetScope              func(string)
@@ -207,6 +208,7 @@ func newServerStateWithContext(ctx context.Context) *serverState {
 		snapshots:       make(map[string]cachedSnapshot),
 		analysisFlights: make(map[string]*analysisFlight),
 		analysisContext: ctx,
+		analysisSlot:    make(chan struct{}, 1),
 		findScope:       analysis.FindAnalysisScope,
 		engine:          engine,
 		forgetScope:     engine.ForgetScope,
@@ -258,20 +260,26 @@ func (s *serverState) handleNotification(method string, params json.RawMessage) 
 		if err != nil {
 			return err
 		}
+		if changed {
+			s.suppressDocumentPositions(path)
+		}
 		s.invalidateDocumentChange(path, changed)
 	case "textDocument/didChange":
 		var input didChangeTextDocumentParams
 		if err := json.Unmarshal(params, &input); err != nil {
 			return fmt.Errorf("decode textDocument/didChange: %w", err)
 		}
-		path, changed, err := s.documents.Change(
+		var inlineEdits [inlineUndoEntryCount]positionEdit
+		path, changed, edits, err := s.documents.ChangeRecorded(
 			input.TextDocument.URI,
 			input.TextDocument.Version,
 			input.ContentChanges,
+			inlineEdits[:0],
 		)
 		if err != nil {
 			return err
 		}
+		s.applyDocumentEdits(path, edits)
 		s.invalidateDocumentChange(path, changed)
 	case "textDocument/didClose":
 		var input textDocumentParams
@@ -279,15 +287,26 @@ func (s *serverState) handleNotification(method string, params json.RawMessage) 
 			return fmt.Errorf("decode textDocument/didClose: %w", err)
 		}
 		path, changed := s.documents.Close(input.TextDocument.URI)
+		if changed {
+			s.discardDocumentPositions(path)
+		}
 		s.invalidateDocumentChange(path, changed)
 		s.forgetDocumentPath(input.TextDocument.URI)
+		if changed {
+			s.noteSavedRefresh(path)
+		}
 	case "textDocument/didSave":
 		var input textDocumentParams
 		if err := json.Unmarshal(params, &input); err != nil {
 			return fmt.Errorf("decode textDocument/didSave: %w", err)
 		}
 		path, changed := s.documents.Save(input.TextDocument.URI)
-		s.invalidateDocumentChange(path, changed)
+		if path != "" && (changed || isModuleMetadataPath(path) || s.hasBlockedScopeForPath(path)) {
+			// A confirmed save can unblock a previously syntax-blocked revision
+			// even when the editor text itself has not changed again.
+			s.invalidateDocumentChange(path, true)
+			s.noteSavedRefresh(path)
+		}
 	case watchedFilesMethod:
 		s.handleWatchedFiles(params)
 	}

@@ -111,16 +111,17 @@ func TestSnapshotCacheEvictionCancelsFlightAndForgetsEngineScope(t *testing.T) {
 		t.Fatal("first scope did not start an analysis flight")
 	}
 	<-firstStarted
+	// Fill the cache without waiting for each queued scope: the first checker
+	// owns the global analysis slot until eviction cancels it.
+	flights := make([]*analysisFlight, 0, maxSnapshotCacheEntries)
 	for index := 1; index < maxSnapshotCacheEntries; index++ {
 		scope := analysis.ModuleAnalysisScope(filepath.Join(root, strconv.Itoa(index)))
-		if _, err := state.snapshotForScope(context.Background(), scope); err != nil {
-			t.Fatalf("snapshotForScope(%d) error = %v", index, err)
-		}
+		_, flight, _ := state.snapshotOrFlight(scope)
+		flights = append(flights, flight)
 	}
 	overflowScope := analysis.ModuleAnalysisScope(filepath.Join(root, "overflow"))
-	if _, err := state.snapshotForScope(context.Background(), overflowScope); err != nil {
-		t.Fatalf("overflow snapshotForScope() error = %v", err)
-	}
+	_, overflowFlight, _ := state.snapshotOrFlight(overflowScope)
+	flights = append(flights, overflowFlight)
 
 	select {
 	case <-firstCanceled:
@@ -130,6 +131,16 @@ func TestSnapshotCacheEvictionCancelsFlightAndForgetsEngineScope(t *testing.T) {
 	<-firstFlight.done
 	if _, err := state.consumeAnalysisFlight(firstFlight); !errors.Is(err, errAnalysisObsolete) {
 		t.Fatalf("evicted analysis flight error = %v, want %v", err, errAnalysisObsolete)
+	}
+	for _, flight := range flights {
+		select {
+		case <-flight.done:
+			if _, err := state.consumeAnalysisFlight(flight); err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("queued scope did not finish after eviction released the slot")
+		}
 	}
 
 	state.cacheMu.RLock()
@@ -192,8 +203,8 @@ func TestSnapshotCacheHitDoesNotPromoteInsertionOrder(t *testing.T) {
 }
 
 func TestSnapshotCacheInvalidatesOnlyChangedScope(t *testing.T) {
-	firstRoot := filepath.Join(t.TempDir(), "first")
-	secondRoot := filepath.Join(t.TempDir(), "second")
+	firstRoot := t.TempDir()
+	secondRoot := t.TempDir()
 	firstScope := analysis.ModuleAnalysisScope(firstRoot)
 	secondScope := analysis.ModuleAnalysisScope(secondRoot)
 	state := newServerState()
@@ -232,15 +243,24 @@ func TestSnapshotCacheInvalidatesOnlyChangedScope(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if got := callCounts[firstScope.CacheKey()]; got != 1 {
+		t.Fatalf("dirty first scope analysis calls = %d, want 1", got)
+	}
+	path := filepath.Join(firstRoot, "sample.go")
+	writeSemanticTestFile(t, path, []byte("package first\n"))
+	saveSavedTest(t, state, path)
+	if _, err := state.snapshotForScope(t.Context(), firstScope); err != nil {
+		t.Fatal(err)
+	}
 	if got := callCounts[firstScope.CacheKey()]; got != 2 {
-		t.Fatalf("first scope analysis calls = %d, want 2", got)
+		t.Fatalf("saved first scope analysis calls = %d, want 2", got)
 	}
 	if got := callCounts[secondScope.CacheKey()]; got != 1 {
 		t.Fatalf("second scope analysis calls = %d, want 1", got)
 	}
 }
 
-func TestSnapshotInvalidationReleasesStaleSemanticData(t *testing.T) {
+func TestSnapshotInvalidationRetainsLastSuccessfulSemanticData(t *testing.T) {
 	moduleRoot := t.TempDir()
 	writeSemanticTestFile(t, filepath.Join(moduleRoot, "go.mod"), []byte("module example.com/release\n\ngo 1.26\n"))
 	filename := filepath.Join(moduleRoot, "release.go")
@@ -269,8 +289,8 @@ func (Worker) Run() {}
 	if cached.valid {
 		t.Fatal("invalidated snapshot remains valid")
 	}
-	if got := len(cached.snapshot.Lenses(uri)); got != 0 {
-		t.Fatalf("invalidated cache retains %d semantic lenses, want 0", got)
+	if got, want := len(cached.snapshot.Lenses(uri)), len(snapshot.Lenses(uri)); got != want {
+		t.Fatalf("invalidated cache retains %d semantic lenses, want last-success count %d", got, want)
 	}
 }
 
@@ -681,6 +701,9 @@ func TestSnapshotForScopeFinalCancellationDoesNotPoisonNextRequest(t *testing.T)
 		t.Fatalf("first request error = %v, want context.Canceled", err)
 	}
 	<-canceled
+	// A replacement waits for the previous checker to actually return rather
+	// than overlapping its still-live semantic graph.
+	release()
 
 	secondCtx, cancelSecond := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelSecond()
@@ -691,7 +714,6 @@ func TestSnapshotForScopeFinalCancellationDoesNotPoisonNextRequest(t *testing.T)
 		t.Fatalf("analysis calls = %d, want 2", got)
 	}
 
-	release()
 	<-firstFlight.done
 }
 

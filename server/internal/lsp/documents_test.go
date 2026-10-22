@@ -43,8 +43,8 @@ func TestDocumentStoreCleanOpenAndSaveTrackEffectiveChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	gotPath, effectiveChange = store.Save(uri)
-	if gotPath != path || effectiveChange {
-		t.Fatalf("matching Save() = (%q, %t), want (%q, false)", gotPath, effectiveChange, path)
+	if gotPath != path || !effectiveChange {
+		t.Fatalf("matching Save() = (%q, %t), want (%q, true)", gotPath, effectiveChange, path)
 	}
 	if got := len(store.Overlay(moduleDir)); got != 0 {
 		t.Fatalf("overlay length after save = %d, want 0", got)
@@ -81,8 +81,8 @@ func TestDocumentStoreSaveMismatchKeepsOverlayAndReportsChange(t *testing.T) {
 	if err := os.WriteFile(path, []byte(changedContent), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if gotPath, changed := store.Save(uri); gotPath != path || changed {
-		t.Fatalf("matching Save() = (%q, %t), want (%q, false)", gotPath, changed, path)
+	if gotPath, changed := store.Save(uri); gotPath != path || !changed {
+		t.Fatalf("matching Save() = (%q, %t), want (%q, true)", gotPath, changed, path)
 	}
 	if got := len(store.Overlay(moduleDir)); got != 0 {
 		t.Fatalf("overlay length after matching save = %d, want 0", got)
@@ -231,8 +231,8 @@ func TestDocumentStoreIgnoresStaleVersionsAndRetainsSavedOpenDocument(t *testing
 		t.Fatal(err)
 	}
 	gotPath, changed = store.Save(uri)
-	if gotPath != path || changed {
-		t.Fatalf("Save() = (%q, %t), want (%q, false)", gotPath, changed, path)
+	if gotPath != path || !changed {
+		t.Fatalf("Save() = (%q, %t), want (%q, true)", gotPath, changed, path)
 	}
 	if got := len(store.Overlay(moduleDir)); got != 0 {
 		t.Fatalf("overlay length after save = %d, want 0", got)

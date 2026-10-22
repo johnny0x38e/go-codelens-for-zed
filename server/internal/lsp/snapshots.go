@@ -10,7 +10,10 @@ import (
 
 const maxSnapshotCacheEntries = 32
 
-var errAnalysisObsolete = errors.New("analysis became obsolete")
+var (
+	errAnalysisObsolete = errors.New("analysis became obsolete")
+	errAnalysisDeferred = errors.New("analysis is waiting for saved documents")
+)
 
 // analysisFlight coalesces all requests for one scope revision. It belongs to
 // the revision rather than the first caller, allowing waiters to cancel
@@ -28,24 +31,34 @@ type analysisFlight struct {
 	err       error
 }
 
-// cachedSnapshot retains a lightweight revision tombstone even while invalid.
-// The large immutable Snapshot is cleared on invalidation and pendingChanges
-// records the exact work the incremental engine must consider next. A valid
-// snapshot always belongs to revision; invalidation clears it under cacheMu.
+// cachedSnapshot retains the last successful immutable result while newer edits
+// are pending. valid means it is current; an invalid result may still be shown
+// with intentionally old counts and text-mapped coordinates. positions and the
+// revision state are protected by cacheMu.
 type cachedSnapshot struct {
 	scope          analysis.AnalysisScope
 	revision       uint64
 	valid          bool
+	blocked        bool
 	snapshot       analysis.Snapshot
 	pendingChanges analysis.ChangeSet
+	positions      map[string]*positionMapping
+	positionsLost  bool
 }
 
-func (s *serverState) snapshotForScope(ctx context.Context, scope analysis.AnalysisScope) (analysis.Snapshot, error) {
+func (s *serverState) snapshotForScope(
+	ctx context.Context,
+	scope analysis.AnalysisScope,
+	requestedPath ...string,
+) (analysis.Snapshot, error) {
 	cacheKey := scope.CacheKey()
 	for {
+		if err := ctx.Err(); err != nil {
+			return analysis.Snapshot{}, err
+		}
 		// A flight belongs to the server revision, not to any one request, so
 		// coalesced callers can cancel independently.
-		snapshot, flight, cached := s.snapshotOrFlight(scope) //nolint:contextcheck
+		snapshot, flight, cached := s.snapshotOrFlight(scope, requestedPath...) //nolint:contextcheck
 		if cached {
 			return snapshot, nil
 		}
@@ -68,11 +81,15 @@ func (s *serverState) snapshotForScope(ctx context.Context, scope analysis.Analy
 	}
 }
 
-func (s *serverState) snapshotOrFlight(scope analysis.AnalysisScope) (analysis.Snapshot, *analysisFlight, bool) {
+func (s *serverState) snapshotOrFlight(
+	scope analysis.AnalysisScope,
+	requestedPath ...string,
+) (analysis.Snapshot, *analysisFlight, bool) {
 	cacheKey := scope.CacheKey()
 	s.cacheMu.RLock()
 	cached, ok := s.snapshots[cacheKey]
-	if ok && cached.valid && sameAnalysisScope(cached.scope, scope) {
+	if ok && sameAnalysisScope(cached.scope, scope) &&
+		(cached.valid || cached.blocked || !s.documents.ReadyForAnalysis(scope)) {
 		s.cacheMu.RUnlock()
 		return cached.snapshot, nil, true
 	}
@@ -86,6 +103,9 @@ func (s *serverState) snapshotOrFlight(scope analysis.AnalysisScope) (analysis.S
 	cached, ok = s.snapshots[cacheKey]
 	if !ok {
 		cached.scope = scope
+		if len(requestedPath) > 0 {
+			cached.pendingChanges = analysis.NewChangeSet(analysis.Change{Path: requestedPath[0]})
+		}
 		s.insertSnapshotLocked(cacheKey, cached)
 	} else if !sameAnalysisScope(cached.scope, scope) {
 		s.forgetScope(cacheKey)
@@ -97,7 +117,7 @@ func (s *serverState) snapshotOrFlight(scope analysis.AnalysisScope) (analysis.S
 		s.snapshots[cacheKey] = cached
 		s.cancelAnalysisFlightLocked(cacheKey)
 	}
-	if cached.valid {
+	if cached.valid || cached.blocked || !s.documents.ReadyForAnalysis(scope) {
 		return cached.snapshot, nil, true
 	}
 
@@ -157,12 +177,10 @@ func (s *serverState) evictSnapshotLocked(cacheKey string) {
 }
 
 func (s *serverState) runAnalysisFlight(cacheKey string, ctx context.Context, flight *analysisFlight) {
-	snapshot, err := s.analyzeScope(
-		ctx,
-		flight.scope,
-		flight.changes,
-		s.documents.OverlayForRoots(flight.scope.ModuleRoots),
-	)
+	snapshot, err := s.analyzeSavedScope(ctx, flight)
+	if err == nil {
+		err = ctx.Err()
+	}
 	flight.cancel()
 
 	// Publish only if both the scope and revision are still current. Obsolete
@@ -171,6 +189,9 @@ func (s *serverState) runAnalysisFlight(cacheKey string, ctx context.Context, fl
 	cached, ok := s.snapshots[cacheKey]
 	current := ok && !flight.abandoned && cached.revision == flight.revision &&
 		sameAnalysisScope(cached.scope, flight.scope)
+	if current && err == nil && !s.documents.ReadyForAnalysis(flight.scope) {
+		err = errAnalysisDeferred
+	}
 	if !current {
 		snapshot = analysis.Snapshot{}
 		err = errAnalysisObsolete
@@ -178,7 +199,16 @@ func (s *serverState) runAnalysisFlight(cacheKey string, ctx context.Context, fl
 		cached.snapshot = snapshot
 		cached.valid = true
 		cached.pendingChanges = analysis.ChangeSet{}
+		cached.positions = nil
+		cached.positionsLost = false
 		s.snapshots[cacheKey] = cached
+	} else if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		// A failed or syntax-blocked revision must not clear working lenses or
+		// restart expensive work on every client request. A later notification
+		// clears blocked and retries against the new saved revision.
+		cached.blocked = !errors.Is(err, errAnalysisDeferred)
+		s.snapshots[cacheKey] = cached
+		snapshot, err = cached.snapshot, nil
 	}
 	if s.analysisFlights[cacheKey] == flight {
 		delete(s.analysisFlights, cacheKey)
@@ -191,6 +221,31 @@ func (s *serverState) runAnalysisFlight(cacheKey string, ctx context.Context, fl
 		clearAnalysisFlightResult(flight)
 	}
 	s.cacheMu.Unlock()
+}
+
+func (s *serverState) analyzeSavedScope(ctx context.Context, flight *analysisFlight) (analysis.Snapshot, error) {
+	// Cancellation is cooperative: a parser/checker may still own its working
+	// graph after its request has returned. Do not start another expensive
+	// analysis until that operation actually exits, even across cache eviction.
+	select {
+	case s.analysisSlot <- struct{}{}:
+		defer func() { <-s.analysisSlot }()
+	case <-ctx.Done():
+		return analysis.Snapshot{}, ctx.Err()
+	}
+	// Both select arms can be ready. Recheck before reading or parsing source.
+	if err := ctx.Err(); err != nil {
+		return analysis.Snapshot{}, err
+	}
+	if !s.documents.ReadyForAnalysis(flight.scope) {
+		return analysis.Snapshot{}, errAnalysisDeferred
+	}
+	if err := checkChangedGoSyntax(ctx, flight.changes, s.documents); err != nil {
+		return analysis.Snapshot{}, err
+	}
+	// Dirty overlays deliberately never enter the semantic engine. The entire
+	// scope must be saved, so Go can reuse dependency export data as well.
+	return s.analyzeScope(ctx, flight.scope, flight.changes, nil)
 }
 
 func (s *serverState) consumeAnalysisFlight(flight *analysisFlight) (analysis.Snapshot, error) {
@@ -254,7 +309,9 @@ func (s *serverState) invalidateSnapshotsForChange(change analysis.Change) {
 		if change.Path != "" && !analysisScopeContainsPath(cached.scope, change.Path) {
 			continue
 		}
-		s.engine.InvalidateScope(cacheKey)
+		if cached.valid || s.analysisFlights[cacheKey] != nil {
+			s.engine.InvalidateScope(cacheKey)
+		}
 		cached = invalidateCachedSnapshot(cached, changeSet)
 		s.snapshots[cacheKey] = cached
 		s.cancelAnalysisFlightLocked(cacheKey)
@@ -283,7 +340,9 @@ func (s *serverState) invalidateSnapshotsForChanges(changes []analysis.Change) {
 		if len(scopeChanges) == 0 {
 			continue
 		}
-		s.engine.InvalidateScope(cacheKey)
+		if cached.valid || s.analysisFlights[cacheKey] != nil {
+			s.engine.InvalidateScope(cacheKey)
+		}
 		cached = invalidateCachedSnapshot(cached, analysis.NewChangeSet(scopeChanges...))
 		s.snapshots[cacheKey] = cached
 		s.cancelAnalysisFlightLocked(cacheKey)
@@ -294,7 +353,9 @@ func (s *serverState) invalidateAllSnapshots(changes analysis.ChangeSet) {
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
 	for cacheKey, cached := range s.snapshots {
-		s.engine.InvalidateScope(cacheKey)
+		if cached.valid || s.analysisFlights[cacheKey] != nil {
+			s.engine.InvalidateScope(cacheKey)
+		}
 		cached = invalidateCachedSnapshot(cached, changes)
 		s.snapshots[cacheKey] = cached
 		s.cancelAnalysisFlightLocked(cacheKey)
@@ -318,10 +379,9 @@ func (s *serverState) cancelAllAnalysisFlights() {
 func invalidateCachedSnapshot(cached cachedSnapshot, changes analysis.ChangeSet) cachedSnapshot {
 	cached.revision++
 	cached.valid = false
-	// Keep the revision tombstone so a new request cannot join obsolete
-	// single-flight work, but release the potentially large semantic graph
-	// immediately.
-	cached.snapshot = analysis.Snapshot{}
+	cached.blocked = false
+	// Keep one last-success result, not a history of semantic graphs. Its text
+	// mappings remain valid until a newer successful analysis replaces both.
 	cached.pendingChanges = cached.pendingChanges.Merge(changes)
 	return cached
 }

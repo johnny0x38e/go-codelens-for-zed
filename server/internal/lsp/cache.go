@@ -20,8 +20,9 @@ type cachedAnalysisScope struct {
 }
 
 type documentPath struct {
-	filename string
-	uri      string
+	filename     string
+	uri          string
+	lastScopeKey string
 }
 
 func (s *serverState) documentPathFor(uri string) (documentPath, error) {
@@ -54,6 +55,16 @@ func (s *serverState) documentPathFor(uri string) (documentPath, error) {
 	s.documentPaths[uri] = resolved
 	s.metadataMu.Unlock()
 	return resolved, nil
+}
+
+func (s *serverState) rememberDocumentScope(uri, cacheKey string) {
+	s.metadataMu.Lock()
+	cached, ok := s.documentPaths[uri]
+	if ok {
+		cached.lastScopeKey = cacheKey
+		s.documentPaths[uri] = cached
+	}
+	s.metadataMu.Unlock()
 }
 
 func (s *serverState) forgetDocumentPath(uri string) {

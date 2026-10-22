@@ -295,6 +295,9 @@ func (e *Engine) Analyze(
 	changes ChangeSet,
 	overlays map[string][]byte,
 ) (Snapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return Snapshot{}, err
+	}
 	cacheKey := scope.CacheKey()
 	emptyChanges := changes.Empty()
 	e.mu.RLock()
@@ -328,6 +331,10 @@ func (e *Engine) Analyze(
 		if !plan.full {
 			index, err := recheckPackages(ctx, state.index, plan, overlays)
 			if err == nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					e.releaseAnalysis(ctx, cacheKey, control)
+					return Snapshot{}, ctxErr
+				}
 				result := scopeAnalysis{
 					snapshot: applyLensChanges(
 						state.snapshot,
@@ -339,11 +346,13 @@ func (e *Engine) Analyze(
 					index: index,
 				}
 				attachFileIdentities(&result)
-				e.publish(cacheKey, control, scope, result)
+				if publishErr := e.publish(ctx, cacheKey, control, scope, result); publishErr != nil {
+					return Snapshot{}, publishErr
+				}
 				return result.snapshot, nil
 			}
 			if !errors.Is(err, errIncrementalFallback) {
-				e.releaseAnalysis(cacheKey, control)
+				e.releaseAnalysis(ctx, cacheKey, control)
 				return Snapshot{}, err
 			}
 			if typedReason, ok := fallbackReasonFromError(err); ok {
@@ -356,17 +365,23 @@ func (e *Engine) Analyze(
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		e.releaseAnalysis(ctx, cacheKey, control)
+		return Snapshot{}, err
+	}
 	if e.observeFallback != nil {
 		e.observeFallback(reason)
 	}
 	result, err := e.analyze(ctx, scope, overlays)
 	if err != nil {
-		e.releaseAnalysis(cacheKey, control)
+		e.releaseAnalysis(ctx, cacheKey, control)
 		return Snapshot{}, err
 	}
 
 	attachFileIdentities(&result)
-	e.publish(cacheKey, control, scope, result)
+	if err := e.publish(ctx, cacheKey, control, scope, result); err != nil {
+		return Snapshot{}, err
+	}
 	return result.snapshot, nil
 }
 
@@ -404,29 +419,35 @@ func (e *Engine) beginAnalysis(
 }
 
 func (e *Engine) publish(
+	ctx context.Context,
 	cacheKey string,
 	control *engineScopeControl,
 	scope AnalysisScope,
 	result scopeAnalysis,
-) {
-	e.finishAnalysis(cacheKey, control, scope, &result)
+) error {
+	return e.finishAnalysis(ctx, cacheKey, control, scope, &result)
 }
 
-func (e *Engine) releaseAnalysis(cacheKey string, control *engineScopeControl) {
-	e.finishAnalysis(cacheKey, control, AnalysisScope{}, nil)
+func (e *Engine) releaseAnalysis(ctx context.Context, cacheKey string, control *engineScopeControl) {
+	// The caller is already returning its analysis error. Cancellation cannot
+	// prevent retiring the publication lease on this release-only path.
+	//nolint:errcheck
+	_ = e.finishAnalysis(ctx, cacheKey, control, AnalysisScope{}, nil)
 }
 
 func (e *Engine) finishAnalysis(
+	ctx context.Context,
 	cacheKey string,
 	control *engineScopeControl,
 	scope AnalysisScope,
 	result *scopeAnalysis,
-) {
+) error {
 	e.mu.Lock()
+	err := ctx.Err()
 	current := e.scopeControls[cacheKey] == control
 	// Pointer identity is the commit point for an analysis revision. No partially
 	// constructed index is visible before this lock is acquired.
-	if current && result != nil {
+	if current && result != nil && err == nil {
 		e.states[cacheKey] = engineScopeState{
 			scope:    cloneAnalysisScope(scope),
 			snapshot: result.snapshot,
@@ -440,6 +461,7 @@ func (e *Engine) finishAnalysis(
 		}
 	}
 	e.mu.Unlock()
+	return err
 }
 
 // ForgetScope releases reusable state for cacheKey and prevents an analysis

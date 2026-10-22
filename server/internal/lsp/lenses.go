@@ -50,18 +50,18 @@ func (s *serverState) semanticCodeLenses(ctx context.Context, params json.RawMes
 	}
 	filename := document.filename
 	scope, err := s.analysisScopeFor(filename)
-	if errors.Is(err, analysis.ErrNoModule) {
-		return []codeLens{}, nil
-	}
-	if err != nil {
-		return []codeLens{}, nil //nolint:nilerr // Scope discovery failures suppress optional lenses without disrupting editing.
-	}
-	snapshot, err := s.snapshotForScope(ctx, scope)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
-		return []codeLens{}, nil // Analysis failures suppress optional lenses without disrupting editing.
+		return s.retainedDocumentLenses(document), nil // Scope failures must not clear an already published result.
+	}
+	snapshot, err := s.snapshotForScope(ctx, scope, filename)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return s.retainedDocumentLenses(document), nil // Keep a successful result across failed scope transitions.
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, ctxErr
@@ -72,42 +72,45 @@ func (s *serverState) semanticCodeLenses(ctx context.Context, params json.RawMes
 	// A cached snapshot can survive an external rewrite that never produced a
 	// watched-file notification. Validate the exact files this answer depends on
 	// before publishing coordinates that may belong to an older revision.
-	if changes := staleLensChanges(snapshot, canonicalURI, semanticLenses); len(changes) > 0 {
+	s.cacheMu.RLock()
+	current := s.snapshots[scope.CacheKey()].valid
+	s.cacheMu.RUnlock()
+	var changes []analysis.Change
+	if current {
+		changes = staleLensChanges(snapshot, canonicalURI, semanticLenses)
+	}
+	if len(changes) > 0 {
+		for _, change := range changes {
+			s.suppressDocumentPositions(change.Path)
+		}
 		s.invalidateSnapshotsForChanges(changes)
 		// The client also caches the previous Location payloads, and only a
 		// refresh request makes Zed re-query and replace them.
 		s.noteCodeLensRefresh()
-		snapshot, err = s.snapshotForScope(ctx, scope)
+		_, err = s.snapshotForScope(ctx, scope, filename)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr
 			}
-			return []codeLens{}, nil // Analysis failures suppress optional lenses without disrupting editing.
+			return s.retainedDocumentLenses(document), nil // Preserve the successful result after a failed refresh.
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
-		semanticLenses = snapshot.Lenses(canonicalURI)
 	}
 
-	result := make([]codeLens, 0, len(semanticLenses))
-	for _, semanticLens := range semanticLenses {
-		lensCommand := command{
-			Title:   semanticLens.Title,
-			Command: "editor.action.showReferences",
-			Arguments: showReferencesArguments{
-				canonicalURI,
-				semanticLens.Range.Start,
-				semanticLens.Targets,
-			},
+	cacheKey := scope.CacheKey()
+	s.cacheMu.RLock()
+	current = s.snapshots[cacheKey].valid
+	s.cacheMu.RUnlock()
+	if current {
+		if document.lastScopeKey != cacheKey {
+			s.rememberDocumentScope(input.TextDocument.URI, cacheKey)
 		}
-		result = append(result, codeLens{
-			Range:   semanticLens.Range,
-			Command: lensCommand,
-		})
+	} else if document.lastScopeKey != "" && document.lastScopeKey != cacheKey {
+		return s.retainedDocumentLenses(document), nil
 	}
-
-	return result, nil
+	return s.retainedCodeLenses(scope, canonicalURI, false), nil
 }
 
 // staleLensChanges returns content changes for the requested document and the

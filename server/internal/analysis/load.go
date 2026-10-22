@@ -26,6 +26,7 @@ type loadedScope struct {
 type sourceParser struct {
 	mu           sync.Mutex
 	sourceByPath map[string][]byte
+	parseErr     error
 }
 
 func loadScopePackages(ctx context.Context, scope AnalysisScope, overlays map[string][]byte) (loadedScope, error) {
@@ -49,6 +50,12 @@ func loadScopePackages(ctx context.Context, scope AnalysisScope, overlays map[st
 	if err != nil {
 		return loadedScope{}, fmt.Errorf("load Go analysis scope: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return loadedScope{}, err
+	}
+	if parser.parseErr != nil {
+		return loadedScope{}, fmt.Errorf("parse Go analysis scope: %w", parser.parseErr)
+	}
 
 	return loadedScope{
 		packages:     loaded,
@@ -65,12 +72,15 @@ func (p *sourceParser) parseFile(fileSet *token.FileSet, filename string, source
 	// packages.Load owns source for the duration of this call and does not
 	// mutate it after parsing. Retaining the slice avoids reading the same file
 	// again solely to translate byte columns to UTF-16 LSP positions.
+	const mode = parser.AllErrors | parser.ParseComments
+	file, parseErr := parser.ParseFile(fileSet, filename, source, mode)
 	p.mu.Lock()
 	p.sourceByPath[filepath.Clean(absolute)] = source
+	if p.parseErr == nil {
+		p.parseErr = parseErr
+	}
 	p.mu.Unlock()
-
-	const mode = parser.AllErrors | parser.ParseComments
-	return parser.ParseFile(fileSet, filename, source, mode)
+	return file, parseErr
 }
 
 func canonicalOverlays(overlays map[string][]byte) (map[string][]byte, error) {

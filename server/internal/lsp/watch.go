@@ -101,6 +101,11 @@ func (s *serverState) handleWatchedFiles(params json.RawMessage) {
 		s.invalidateAnalysisScopes()
 	}
 
+	for _, change := range changes {
+		if !s.documents.IsOpen(change.Path) {
+			s.suppressDocumentPositions(change.Path)
+		}
+	}
 	s.invalidateSnapshotsForChanges(changes)
 	// The edit did not pass through an editor buffer, so any lens payload the
 	// client still holds may describe the previous revision.

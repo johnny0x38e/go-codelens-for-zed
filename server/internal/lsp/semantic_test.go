@@ -467,7 +467,7 @@ func (Person) UnusedMethod() {}
 	_ = findSemanticTestLens(t, implementationLenses, "0 references", 15)
 }
 
-func TestServeDoesNotPublishObsoleteLensesAfterUnsavedSignatureChange(t *testing.T) {
+func TestServeDefersAnalysisAfterUnsavedSignatureChange(t *testing.T) {
 	moduleDir := t.TempDir()
 	savedSource := []byte(`package sample
 
@@ -552,28 +552,16 @@ func (Person) Greet() string { return "hello" }
 	_ = readTestFrame(t, reader)
 	responses := readSemanticTestResponsePairByID(t, reader)
 	for _, id := range []int{2, 3} {
-		lenses := semanticTestResponseLenses(t, responses[id])
-		zeroTypeImplementations := findSemanticTestLens(t, lenses, "0 implementations", 2)
-		assertSemanticTestTargetStarts(t, zeroTypeImplementations)
-		zeroMethodImplementations := findSemanticTestLens(t, lenses, "0 implementations", 3)
-		assertSemanticTestTargetStarts(t, zeroMethodImplementations)
-		for _, value := range lenses {
-			lens, ok := value.(map[string]any)
-			if !ok {
-				continue
-			}
-			line := semanticTestStartLine(lens["range"])
-			if (line == 6 || line == 8) && semanticTestIsImplementationLens(lens) {
-				t.Fatalf("response %d published an obsolete implementation CodeLens: %#v", id, lens)
-			}
+		if lenses := semanticTestResponseLenses(t, responses[id]); len(lenses) != 0 {
+			t.Fatalf("response %d published lenses without a saved successful revision: %#v", id, lenses)
 		}
 	}
-	if got := analysisCalls.Load(); got != 2 {
-		t.Fatalf("analysis calls = %d, want one canceled and one current analysis", got)
+	if got := analysisCalls.Load(); got != 1 {
+		t.Fatalf("analysis calls = %d, want only the canceled initial analysis", got)
 	}
 }
 
-func TestServeIncrementalChangesMatchFinalDiskAnalysis(t *testing.T) {
+func TestServeSavedIncrementalChangesMatchFinalDiskAnalysis(t *testing.T) {
 	moduleDir := t.TempDir()
 	writeSemanticTestFile(t, filepath.Join(moduleDir, "go.mod"), []byte("module example.com/incremental\n\ngo 1.26\n"))
 	initialSource := []byte(`package sample
@@ -621,9 +609,14 @@ func (*Worker) Run(value string) {}
 			},
 		},
 	})
+	writeTestFrame(t, incrementalInput, map[string]any{
+		"jsonrpc": "2.0", "method": "textDocument/didSave",
+		"params": textDocumentParams{TextDocument: textDocumentIdentifier{URI: documentURI}},
+	})
 	writeSemanticTestCodeLensRequest(t, incrementalInput, 2, documentURI)
 	writeTestFrame(t, incrementalInput, map[string]any{"jsonrpc": "2.0", "method": "exit"})
 
+	writeSemanticTestFile(t, filename, finalSource)
 	incrementalOutput := new(bytes.Buffer)
 	if err := Serve(context.Background(), incrementalInput, incrementalOutput); err != nil {
 		t.Fatalf("Serve(incremental) error = %v", err)

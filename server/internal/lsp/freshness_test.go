@@ -60,6 +60,7 @@ func TestServeDoesNotRequestCodeLensRefreshForEditorChanges(t *testing.T) {
 
 	session := startFreshnessTestSession(t)
 	session.initialize(t, moduleDir, true)
+	assertFreshnessLensTarget(t, session.requestLenses(t, declarationURI, 2), referenceURI, 2)
 
 	original, err := os.ReadFile(referenceFile)
 	if err != nil {
@@ -76,7 +77,7 @@ func TestServeDoesNotRequestCodeLensRefreshForEditorChanges(t *testing.T) {
 		},
 	})
 
-	assertFreshnessLensTarget(t, session.requestLenses(t, declarationURI, 2), referenceURI, 6)
+	assertFreshnessLensTarget(t, session.requestLenses(t, declarationURI, 3), referenceURI, 6)
 	session.finish(t)
 	if frame, err := readFrame(session.reader); !errors.Is(err, io.EOF) {
 		t.Fatalf("unexpected frame after editor change = %#v, error = %v", frame, err)

@@ -36,6 +36,9 @@ func analyzeScope(
 	overlays map[string][]byte,
 	retainIndex bool,
 ) (scopeAnalysis, error) {
+	if err := ctx.Err(); err != nil {
+		return scopeAnalysis{}, err
+	}
 	absoluteOverlays, err := canonicalOverlays(overlays)
 	if err != nil {
 		return scopeAnalysis{}, err
@@ -50,6 +53,9 @@ func analyzeScope(
 	if err != nil {
 		return scopeAnalysis{}, err
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return scopeAnalysis{}, ctxErr
+	}
 	result := scopeAnalysis{}
 	if retainIndex {
 		// Incremental mode pays the one-time indexing cost so later edits can
@@ -62,6 +68,9 @@ func analyzeScope(
 	} else {
 		// One-shot analysis avoids retaining the type graph and its indexes.
 		result.snapshot = snapshotFromFacts(facts)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return scopeAnalysis{}, ctxErr
 	}
 	return result, nil
 }

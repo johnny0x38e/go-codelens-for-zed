@@ -48,6 +48,7 @@ type textBufferUndo struct {
 	deletedLength  int
 	deletedHeap    []byte
 	inlineDeleted  [inlineUndoBytes]byte
+	edit           positionEdit
 }
 
 func newTextBuffer(text string) *textBuffer {
@@ -57,11 +58,21 @@ func newTextBuffer(text string) *textBuffer {
 }
 
 func (b *textBuffer) apply(changes []textDocumentContentChangeEvent) (bool, error) {
+	changed, _, err := b.applyRecorded(changes, nil)
+	return changed, err
+}
+
+// applyRecorded commits positional edits only after the entire notification
+// succeeds. A non-nil destination enables recording without copying source.
+func (b *textBuffer) applyRecorded(
+	changes []textDocumentContentChangeEvent,
+	edits []positionEdit,
+) (bool, []positionEdit, error) {
 	if len(changes) == 0 {
-		return false, nil
+		return false, edits, nil
 	}
 	if len(changes) == 1 {
-		return b.applyOne(changes[0])
+		return b.applyOneRecorded(changes[0], edits)
 	}
 
 	// Zed normally sends only a handful of edits. Keep that journal on the
@@ -76,7 +87,7 @@ func (b *textBuffer) apply(changes []textDocumentContentChangeEvent) (bool, erro
 		start, end, err := b.changeBounds(change)
 		if err != nil {
 			b.rollback(journal[:applied])
-			return false, fmt.Errorf("apply content change %d: %w", index, err)
+			return false, edits, fmt.Errorf("apply content change %d: %w", index, err)
 		}
 		if b.rangeEqualsString(start, end, change.Text) {
 			continue
@@ -86,35 +97,50 @@ func (b *textBuffer) apply(changes []textDocumentContentChangeEvent) (bool, erro
 		undo.start = start
 		undo.insertedLength = len(change.Text)
 		undo.captureDeleted(b, start, end)
+		if edits != nil {
+			undo.edit = b.recordPositionEdit(change, start, end)
+		}
 		b.replace(start, end, textBufferInsertion{text: change.Text})
 		applied++
 	}
 
-	return applied > 0, nil
+	if edits != nil {
+		for index := range applied {
+			edits = append(edits, journal[index].edit)
+		}
+	}
+	return applied > 0, edits, nil
 }
 
-func (b *textBuffer) applyOne(change textDocumentContentChangeEvent) (bool, error) {
+func (b *textBuffer) applyOneRecorded(
+	change textDocumentContentChangeEvent,
+	edits []positionEdit,
+) (bool, []positionEdit, error) {
 	if change.Range == nil {
 		if !utf8.ValidString(change.Text) {
-			return false, errors.New("replacement text is not valid UTF-8")
+			return false, edits, errors.New("replacement text is not valid UTF-8")
 		}
 		if b.equalsString(change.Text) {
-			return false, nil
+			return false, edits, nil
+		}
+		if edits != nil {
+			edits = append(edits, b.recordPositionEdit(change, 0, b.logicalLength()))
 		}
 		b.reset(change.Text)
-		return true, nil
+		return true, edits, nil
 	}
-
 	start, end, err := b.changeBounds(change)
 	if err != nil {
-		return false, err
+		return false, edits, err
 	}
 	if b.rangeEqualsString(start, end, change.Text) {
-		return false, nil
+		return false, edits, nil
 	}
-
+	if edits != nil {
+		edits = append(edits, b.recordPositionEdit(change, start, end))
+	}
 	b.replace(start, end, textBufferInsertion{text: change.Text})
-	return true, nil
+	return true, edits, nil
 }
 
 func (b *textBuffer) changeBounds(change textDocumentContentChangeEvent) (int, int, error) {
