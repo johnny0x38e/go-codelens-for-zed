@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Shows symbol reference counts and interface implementation relationships in Go code in Zed, with click-to-navigate support.
+Shows symbol reference counts and interface implementation relationships for Go code in Zed, with click-to-navigate support.
 
 Go interfaces are implemented implicitly, so an interface does not list its implementers and a concrete type does not say which interfaces it satisfies. `gopls` remains the primary Go language server but does not provide this relationship view. Go CodeLens runs as a separate auxiliary language server beside it, adds reference and implementation entries, and leaves completion, diagnostics, formatting, rename, and other Go editing features to `gopls`.
 
@@ -17,13 +17,14 @@ The extension is not yet available in Zed's extension registry. To try it locall
 1. Install Zed 1.14.2+, Go 1.27+, Rust with the `wasm32-wasip2` target, and just 1.56+.
 2. Clone this repository, then build and install the server:
 
-   ```sh
-   git clone https://github.com/johnny0x38e/go-codelens-for-zed.git
-   cd go-codelens-for-zed
-   just install
-   ```
+    ```sh
+    git clone https://github.com/johnny0x38e/go-codelens-for-zed.git
+    cd go-codelens-for-zed
+    just install
+    ```
 
-   The server is installed to `~/.local/bin` by default; make sure Zed can find it on `PATH`.
+    The server is installed to `~/.local/bin` by default; make sure Zed can find it on `PATH`.
+
 3. In Zed, run `zed: install dev extension` and select the cloned repository.
 
 No explicit `language_servers` configuration is needed. If CodeLens is not visible, enable `"code_lens": "on"` in Zed's `settings.json`.
@@ -96,18 +97,18 @@ Requirements: Zed 1.14.2+, Go 1.27+, Rust with `wasm32-wasip2`, just 1.56+, and 
 
 Build and install the CodeLens server for the current host with `just install` (default `~/.local/bin`; set `GO_CODELENS_BIN_DIR` if Zed uses another directory). Marketplace installs need no local tools: when there is no `PATH` override, Zed downloads the matching binary.
 
-| Command | Purpose |
-| --- | --- |
+| Command                                 | Purpose                                    |
+| --------------------------------------- | ------------------------------------------ |
 | `just build` / `just build linux amd64` | Build the host server or a specific target |
-| `just build-wasm` | Build the WebAssembly adapter |
-| `just install` | Build and install the host server |
-| `just fmt` | Format Go, Rust, and the justfile |
-| `just test` / `just race` | Run tests / the race detector |
-| `just vet` / `just lint` | Run `go vet` / lint Go and Rust |
-| `just check` | Run the complete local verification suite |
-| `just bench` | Run tests, benchmarks, and profiling |
-| `just set-version 0.3.3` | Update release versions |
-| `just check-version` | Check release version consistency |
+| `just build-wasm`                       | Build the WebAssembly adapter              |
+| `just install`                          | Build and install the host server          |
+| `just fmt`                              | Format Go, Rust, and the justfile          |
+| `just test` / `just race`               | Run tests / the race detector              |
+| `just vet` / `just lint`                | Run `go vet` / lint Go and Rust            |
+| `just check`                            | Run the complete local verification suite  |
+| `just bench`                            | Run tests, benchmarks, and profiling       |
+| `just set-version 0.3.3`                | Update release versions                    |
+| `just check-version`                    | Check release version consistency          |
 
 `just build [os] [arch] [output]` accepts the same targets and output path as the build scripts; relative paths start at the repository root:
 
