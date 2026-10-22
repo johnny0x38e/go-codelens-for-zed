@@ -4,7 +4,7 @@
 
 在 Zed 的 Go 代码中显示符号引用计数与接口实现关系，点击即可跳转。
 
-Go 接口采用隐式实现，因此接口不会列出实现它的类型，具体类型也不会说明自己实现了哪些接口。`gopls` 仍是 Go 的主要语言服务器，但不提供这种关系视图。Go CodeLens 作为独立的辅助语言服务器与 `gopls` 同时运行，只补充引用和实现关系；补全、诊断、格式化、重命名等编辑功能仍由 `gopls` 负责。
+Go CodeLens 作为辅助语言服务器与 `gopls` 同时运行。补全、诊断、格式化、重命名等 Go 编辑功能仍由 `gopls` 负责。
 
 本项目受 [Anirudh Agarwal](https://github.com/anirudhagarwal365) 开发的 Visual Studio Code 扩展 [Go Implementation Lens](https://github.com/anirudhagarwal365/go-implementation-lens) 启发。本仓库是面向 Zed 的独立实现，基于 Go 的类型系统。
 
@@ -38,9 +38,8 @@ Go 接口采用隐式实现，因此接口不会列出实现它的类型，具�
 - 在命名类型上显示 `Implements: Interface`，在接收者方法上显示 `Implements: Interface.Method`；一个声明实现多个接口时会一起显示。
 - 支持内部和外部 `_test.go` 测试包。
 - 通过最近的 `go.work` 文件（Go 的工作区文件）分析多模块项目；单模块项目不需要工作文件。
-- 通过编辑器发送的增量修改，立即分析尚未保存的内容。
 
-接口关系由 `go/types.Implements` 判定，包括指针接收者和提升方法。方法关系要求包、名称和 `types.Identical` 签名一致。引用数量来自 `go/types.Info.Defs` 和 `go/types.Info.Uses`：排除声明位置，合并普通包与测试包中的重复位置，并忽略名称相同但无关的符号。
+关系由 Go 类型信息判定，支持指针接收者和提升方法。引用数量不含声明位置，普通包和测试包中的重复位置只计算一次。
 
 ## 实现方式
 
@@ -52,43 +51,9 @@ Zed
     └── go-codelens-ls       辅助 CodeLens 语言服务器（独立进程）
 ```
 
-适配层先在项目的 `PATH` 环境变量中查找 `go-codelens-ls`；找不到时，下载版本匹配的 GitHub Release 文件，用 `SHA256SUMS` 校验后缓存到 Zed 的扩展工作目录。CodeLens 服务器随后找到模块或 `go.work` 工作区，加载一套一致的类型信息，并通过 Language Server Protocol（LSP）返回标准 CodeLens 结果。服务器入口是 `server/cmd/go-codelens-ls`，实现包位于 `server/internal`。
+Rust/WebAssembly 适配层优先使用项目 `PATH` 中的 `go-codelens-ls`。找不到时，下载版本匹配的 GitHub Release 可执行文件，用 `SHA256SUMS` 校验后缓存到 Zed 的扩展工作目录。
 
-- **结果准确：** 所有关系由 `go/types` 校验；名称索引只用于缩小候选范围。
-- **增量分析：** 函数体修改后重新检查拥有该文件的包，API 修改后重新检查依赖它的包，结构或模块变化回退到完整的 `packages.Load`。
-- **只读结果：** 更新时只复制变化的数据，读取者共享未变化的 map、slice 和跳转目标；过期结果不会返回。
-- **快速编辑：** UTF-8 文本缓冲区和行首索引应用 UTF-16 修改，无需重建整份文档。
-- **受控的并发与缓存：** 同一文档版本的请求共享一次分析，无人等待的任务会取消，模块和结果缓存有固定上限。
-- **减少磁盘读写：** 只读取打开或修改的文档，以及精确的编译源码路径；默认不写日志、索引或持久缓存。`GO_CODELENS_TRACE` 会记录 LSP 方法调用。
-- **稳定与跨平台：** 输出会排序、去重，并使用 LSP UTF-16 位置；CodeLens 服务器构建时不需要 C 编译器，支持 macOS、Linux、Windows 的 arm64 和 x86-64，发布文件经过 SHA-256 校验。
-
-## 性能
-
-在 Apple M1 Pro、Go 1.26.5 上，对未经修改的 Kubernetes 浅克隆（不含完整历史）进行了测试。
-
-| Kubernetes 测试项目                 |                                       数值 |
-| ----------------------------------- | -----------------------------------------: |
-| 提交                                | `b882c60b4023bdf09264c2d5d30a2cadebc240fb` |
-| 检出目录大小                        |                                    395 MiB |
-| 受版本控制的 Go 文件（不含 vendor） |                                     13,414 |
-| `go.work` 中的模块                  |                                         34 |
-| 工作区中的包                        |                                      3,029 |
-| 请求 CodeLens 的文件                |                   `pkg/probe/exec/exec.go` |
-
-| 测量项                             |       结果 |
-| ---------------------------------- | ---------: |
-| 首次完整工作区分析与 CodeLens 请求 |  4m42.692s |
-| 同一进程中的缓存重复请求           | 249.958 µs |
-| 返回的 CodeLens 数量               |         10 |
-| 请求取消后的返回时间               |   4.542 µs |
-| 分析器停止所需时间                 |   1.967 ms |
-| 进程内存峰值                       |   3.69 GiB |
-| macOS 报告的内存峰值               |   6.66 GiB |
-| 使用的交换空间                     |          0 |
-
-这是一次观察，不是经过统计采样的基准。首次分析包含全部 34 个模块并启用测试，大部分时间用于首次 `packages.Load`；缓存后的重复请求在微秒级返回，预期的 10 个 CodeLens 全部存在。
-
-`just bench` 运行正确性、竞态、基准、内存分配和性能分析测试；性能分析文件写入 `$TMPDIR`。
+原生服务器（`server/cmd/go-codelens-ls`）加载模块或 `go.work` 工作区的 Go 类型信息，返回标准 LSP CodeLens 结果。默认不写日志、索引或持久缓存；设置 `GO_CODELENS_TRACE` 可记录 LSP 方法调用。
 
 ## 开发与构建
 

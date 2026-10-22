@@ -4,7 +4,7 @@
 
 Shows symbol reference counts and interface implementation relationships for Go code in Zed, with click-to-navigate support.
 
-Go interfaces are implemented implicitly, so an interface does not list its implementers and a concrete type does not say which interfaces it satisfies. `gopls` remains the primary Go language server but does not provide this relationship view. Go CodeLens runs as a separate auxiliary language server beside it, adds reference and implementation entries, and leaves completion, diagnostics, formatting, rename, and other Go editing features to `gopls`.
+Go CodeLens runs alongside `gopls` as an auxiliary language server. Completion, diagnostics, formatting, rename, and other Go editing features remain with `gopls`.
 
 The project was inspired by [Go Implementation Lens for Visual Studio Code](https://github.com/anirudhagarwal365/go-implementation-lens), created by [Anirudh Agarwal](https://github.com/anirudhagarwal365). This repository is an independent implementation for Zed, built on Go's type system.
 
@@ -39,9 +39,8 @@ After changing the extension, run `zed: rebuild dev extension`.
 - `Implements: Interface` on named types and `Implements: Interface.Method` on receiver methods; a declaration that satisfies several interfaces shows all of them.
 - Handles internal and external `_test.go` test packages.
 - Uses the nearest `go.work` file (Go's workspace file) for multi-module projects; single-module projects need no work file.
-- Applies incremental document changes from the editor, so unsaved edits are analyzed immediately.
 
-Interface relationships use `go/types.Implements`, including pointer receivers and promoted methods. Method relationships require the same package and name plus a `types.Identical` signature. Reference counts come from `go/types.Info.Defs` and `go/types.Info.Uses`; declaration sites are excluded, duplicate locations from production and test packages are merged, and unrelated symbols with the same name are ignored.
+Relationships use Go's type information, including pointer receivers and promoted methods. Counts exclude declaration sites and merge duplicate locations from production and test packages.
 
 ## How it works
 
@@ -53,43 +52,9 @@ Zed
     └── go-codelens-ls       auxiliary CodeLens language server (separate process)
 ```
 
-The adapter looks for `go-codelens-ls` on the project's `PATH`; if absent, it downloads the matching GitHub Release file, verifies it against `SHA256SUMS`, and caches the executable in Zed's extension work directory. The CodeLens server finds the module or `go.work` workspace, loads one consistent set of type information, and returns standard CodeLens results over the Language Server Protocol (LSP). The server entry point is `server/cmd/go-codelens-ls`; implementation packages live under `server/internal`.
+The Rust/WebAssembly adapter uses `go-codelens-ls` from the project's `PATH`. If absent, it downloads the matching GitHub Release binary, verifies it against `SHA256SUMS`, and caches it in Zed's extension work directory.
 
-- **Exact results:** every relationship is checked by `go/types`; name-based indexes only narrow candidates.
-- **Incremental analysis:** body edits recheck the packages that own the changed files, API edits recheck their dependents, and structural or module changes fall back to a full `packages.Load`.
-- **Read-only results:** updates copy only changed data, so readers share unchanged maps, slices, and target lists; outdated results are never returned.
-- **Fast edits:** a UTF-8 text buffer with a line-start index applies UTF-16 edits without rebuilding the document.
-- **Bounded concurrency and caches:** requests for the same document version share one analysis, abandoned work is canceled, and module and result caches have fixed limits.
-- **Low disk I/O:** files are read only for opened or changed documents and exact compiled-source paths; by default it writes no logs, index, or persistent cache. `GO_CODELENS_TRACE` records LSP method calls.
-- **Stable and portable:** output is sorted, deduplicated, and uses LSP UTF-16 positions; the CodeLens server is built without a C compiler and supports macOS, Linux, and Windows on arm64 and x86-64, with SHA-256-checked releases.
-
-## Performance
-
-Tested on an unmodified shallow Kubernetes checkout (no full history) on an Apple M1 Pro with Go 1.26.5.
-
-| Kubernetes test checkout                          |                                      Value |
-| ------------------------------------------------- | -----------------------------------------: |
-| Commit                                            | `b882c60b4023bdf09264c2d5d30a2cadebc240fb` |
-| Checkout size                                     |                                    395 MiB |
-| Go files under version control (excluding vendor) |                                     13,414 |
-| Modules in `go.work`                              |                                         34 |
-| Packages in the workspace                         |                                      3,029 |
-| File used for the CodeLens request                |                   `pkg/probe/exec/exec.go` |
-
-| Measurement                                        |     Result |
-| -------------------------------------------------- | ---------: |
-| First full workspace analysis and CodeLens request |  4m42.692s |
-| Repeat request in the same process (cached result) | 249.958 µs |
-| CodeLens entries returned                          |         10 |
-| Time to return after a request is canceled         |   4.542 µs |
-| Time for the analyzer to stop after cancellation   |   1.967 ms |
-| Peak process memory                                |   3.69 GiB |
-| Peak memory reported by macOS                      |   6.66 GiB |
-| Swap used                                          |          0 |
-
-This is one observation, not a sampled benchmark. The first analysis includes all 34 modules with tests enabled; most of the time is the initial `packages.Load`. Cached repeat requests return in microseconds, and all ten expected CodeLens entries were present.
-
-`just bench` runs the correctness, race, benchmark, allocation, and profiling tests; profiles go under `$TMPDIR`.
+The native server (`server/cmd/go-codelens-ls`) loads Go type information for the module or `go.work` workspace and returns standard LSP CodeLens results. It writes no logs, indexes, or persistent caches by default. Set `GO_CODELENS_TRACE` to trace LSP method calls.
 
 ## Development and build
 

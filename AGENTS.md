@@ -6,7 +6,7 @@ These instructions apply to the entire repository.
 
 Go CodeLens for Zed is an auxiliary language server extension. It adds semantic Go reference and interface-implementation CodeLens entries while `gopls` remains Zed's primary Go language server. Preserve that separation: do not proxy `gopls` or broaden the sidecar into a general-purpose Go language server.
 
-Correctness and performance are both release requirements. Optimizations must preserve existing lenses, titles, reference counts, navigation targets, `_test.go` behavior, `go.work` behavior, cancellation semantics, and unsaved-document behavior.
+Correctness and performance are both release requirements. Optimizations must preserve existing lenses, titles, reference counts, navigation targets, `_test.go` behavior, `go.work` behavior, cancellation semantics, and the documented save-gated update behavior.
 
 ## Repository layout
 
@@ -30,7 +30,9 @@ Keep the package boundary `cmd/go-codelens-ls -> internal/lsp -> internal/analys
 - Treat published package facts, relationship indexes, and snapshots as immutable. Incremental updates may share unchanged maps, slices, and backing arrays only under that contract.
 - Keep production, internal-test, and external-test package variants distinct internally, then deduplicate user-visible results by exact source location where required.
 - LSP positions are UTF-16 code-unit positions. Do not replace them with byte or rune offsets.
-- A canceled, invalidated, or obsolete analysis must never publish stale state.
+- Semantic updates are saved-only: every open document in the analysis scope must be confirmed saved, and saved Go syntax must parse. A `go.work` scope includes every member module. Do not reintroduce dirty overlays into the LSP analysis path.
+- Keep the last successful semantic result while updates are deferred or fail. Counts may intentionally lag edits; retained coordinates must be text-mapped, and deleted, overwritten, or unmappable locations must not be returned. Keep mapping state bounded.
+- A canceled, invalidated, or obsolete analysis must never publish stale state. Cancellation is cooperative, so a replacement expensive analysis must wait until the previous one actually exits.
 
 ## Performance and I/O rules
 
@@ -38,7 +40,7 @@ Keep the package boundary `cmd/go-codelens-ls -> internal/lsp -> internal/analys
 - Prefer algorithmic reductions, bounded state, immutable sharing, and exact invalidation over pooling by default. Add a pool only with benchmark and retained-memory evidence.
 - Keep cache sizes bounded. Do not add hit promotion or background maintenance that turns read-only cache hits into write-lock operations without evidence.
 - Avoid directory-wide scans when retained package ownership or exact compiled-file paths are available.
-- Dirty editor buffers are the source of truth. Copy them only when producing immutable analysis overlays.
+- Dirty editor buffers are the source of truth for synchronization and retained-position mapping. Do not copy or parse whole buffers while typing; semantic analysis waits for confirmed saves and uses disk source.
 - The extension must not write logs, semantic indexes, or persistent caches during normal operation. Standard Go build-cache activity from `go/packages` is acceptable.
 - Keep native builds cgo-free unless a reviewed requirement proves otherwise.
 - Cross-compilation is not native runtime validation. Do not claim a platform is release-verified until URI, path, process, and language-server behavior have been exercised on that platform.
